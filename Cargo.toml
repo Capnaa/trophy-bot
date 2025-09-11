@@ -1,12 +1,15 @@
 [package]
 name = "trophy-bot"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2024"
 
 [dependencies]
-clap = { version = "4.5.47", features = ["derive"] }
+clap = { version = "4.5.47", features = ["derive", "env"] }
+dotenvs = "0.1.0"
+env_logger = "0.11.8"
 log = "0.4.28"
 tokio = { version = "1.47.1", features = ["full"] }
+twilight-model = "0.16.0"
 
 [profile.release]
 opt-level = 3

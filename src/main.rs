@@ -1,12 +1,9 @@
-use clap::Parser;
-
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
-struct Cli {
-}
+mod cli;
+use cli::Cli;
 
 #[tokio::main]
 async fn main() {
-    log::info!("Starting {} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-    let args = Cli::parse();
+    let args = Cli::parse(); // Keep this always as the first line of main.
+
+    println!("{} {}", args.bot_id, args.debug);
 }
