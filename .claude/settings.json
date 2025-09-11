@@ -1,0 +1,87 @@
+{
+  "allowlist": [
+    "**/README.md",
+    "src/**/*",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".env",
+    ".env.example",
+    "migrations/**/*",
+    "sqlx-data.json",
+    "CLAUDE.md",
+    "DISCORD_COMMANDS_DOCUMENTATION.md"
+  ],
+  "allowedCommands": [
+    {
+      "command": "git status",
+      "description": "Check git repository status"
+    },
+    {
+      "command": "git add .",
+      "description": "Stage all changes for commit"
+    },
+    {
+      "command": "git diff",
+      "description": "Show git changes"
+    },
+    {
+      "command": "git log --oneline -10",
+      "description": "Show recent git commits"
+    },
+    {
+      "command": "cargo check",
+      "description": "Check Rust code for errors without building"
+    },
+    {
+      "command": "cargo build",
+      "description": "Build the Rust project"
+    },
+    {
+      "command": "cargo build --release",
+      "description": "Build the Rust project in release mode"
+    },
+    {
+      "command": "cargo test",
+      "description": "Run Rust tests"
+    },
+    {
+      "command": "cargo test -- --nocapture",
+      "description": "Run Rust tests with output"
+    },
+    {
+      "command": "cargo clippy",
+      "description": "Run Rust linter"
+    },
+    {
+      "command": "cargo fmt",
+      "description": "Format Rust code"
+    },
+    {
+      "command": "cargo run",
+      "description": "Run the Rust application"
+    },
+    {
+      "command": "sqlx migrate run",
+      "description": "Run database migrations"
+    },
+    {
+      "command": "sqlx migrate revert",
+      "description": "Revert last database migration"
+    },
+    {
+      "command": "sqlx prepare",
+      "description": "Prepare SQLx queries for compilation"
+    }
+  ],
+  "editablePatterns": [
+    "src/**/*",
+    "README.md",
+    "Cargo.toml",
+    ".env",
+    ".env.example",
+    "migrations/**/*"
+  ],
+  "readablePatterns": [
+    "**/*"
+  ]
+}

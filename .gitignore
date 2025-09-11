@@ -135,3 +135,6 @@ example_db.json
 images/
 
 .env
+
+.DS_Store
+Thumbs.db
