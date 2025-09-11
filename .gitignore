@@ -138,3 +138,8 @@ images/
 
 .DS_Store
 Thumbs.db
+
+
+# Added by cargo
+
+/target

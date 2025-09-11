@@ -1,0 +1,15 @@
+[package]
+name = "trophy-bot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.47", features = ["derive"] }
+log = "0.4.28"
+tokio = { version = "1.47.1", features = ["full"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
