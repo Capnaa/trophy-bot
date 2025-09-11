@@ -130,7 +130,7 @@ dist
 .pnp.*
 
 json.sqlite
-example_db.json
+*_db.json
 
 images/
 
