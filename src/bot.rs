@@ -58,16 +58,7 @@ struct Handler;
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
-        log::info!("🎯 Bot ready! Logged in as: {}", ready.user.name);
-        
-        // Log shard and session information
-        let shard_id = ctx.shard_id;
-        log::info!("💗 Shard ID: {} | Session ID: {}", shard_id, ready.session_id);
-        log::info!("💗 Resume Gateway URL: {}", ready.resume_gateway_url);
-        
-        // Log heartbeat management info
-        log::info!("💗 Heartbeat: Managed automatically by Serenity");
-        log::info!("💗 Interval: Determined by Discord's Hello payload (OP 10)");
+        log::info!("Bot ready! Logged in as {}", ready.user.name);
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: serenity::all::Interaction) {
