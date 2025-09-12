@@ -13,6 +13,8 @@ Trophy Bot is a **gamification and community recognition system** for Discord se
 
 The bot solves the problem of informal appreciation by creating tangible rewards, social status, and competitive motivation within Discord communities.
 
+Always after change code, run cargo test to ensure no errors.
+
 ## Architecture
 
 ### Core Structure

@@ -9,12 +9,14 @@ pub struct Cli {
     pub bot_id: String,
     #[arg(long, env = "DISCORD_TOKEN")]
     token: String, // Avoid to make it public for security reasons.
+    #[arg(long, env = "DATABASE_URL")]
+    pub database_url: String,
 }
 
 impl Cli {
     pub fn parse() -> Self {
         env_logger::builder()
-            .filter_level(log::LevelFilter::Trace)
+            .filter_level(log::LevelFilter::Debug)
             .init();
 
         log::info!("Starting {} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
