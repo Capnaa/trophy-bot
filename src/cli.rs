@@ -1,4 +1,7 @@
 use clap::Parser;
+use serenity::all::{GatewayIntents, Http};
+use serenity::Client;
+use serenity::client::ClientBuilder;
 
 #[derive(Parser)] // Does not implement Debug to avoid leaking sensitive info.
 #[command(version, about, long_about = None)]
@@ -20,7 +23,7 @@ impl Cli {
             .init();
 
         log::info!("Starting {} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-        if let Err(e) = dotenv::load() {
+        if let Err(e) = dotenv::dotenv() {
             log::error!("Can not load .env file: {}", e);
         }
 
@@ -29,9 +32,25 @@ impl Cli {
             log::set_max_level(log::LevelFilter::Debug);
             log::debug!("Options for bot ID {} loaded", args.bot_id);
         } else {
-            log::set_max_level(log::LevelFilter::Info);
+            log::set_max_level(log::LevelFilter::Warn);
         }
 
         args
+    }
+}
+
+// This keeps the token private and avoids accidental logging, at least in our code.
+
+impl From<&Cli> for Http {
+    #[inline]
+    fn from(args: &Cli) -> Self {
+        Http::new(args.token.as_str())
+    }
+}
+
+impl From<&Cli> for ClientBuilder {
+    #[inline]
+    fn from(args: &Cli) -> Self {
+        Client::builder(args.token.as_str(), GatewayIntents::GUILDS)
     }
 }

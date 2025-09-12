@@ -1,9 +1,15 @@
 mod cli;
+mod bot;
+
 use cli::Cli;
+use bot::Bot;
+use anyhow::Result;
 
 #[tokio::main]
-async fn main() {
-    let args = Cli::parse(); // Keep this always as the first line of main.
-
-    println!("{} {}", args.bot_id, args.debug);
+async fn main() -> Result<()> {
+    let args = Cli::parse();
+    Bot::new(&args)
+        .await?
+        .run()
+        .await
 }

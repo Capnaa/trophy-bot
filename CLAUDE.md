@@ -15,6 +15,10 @@ The bot solves the problem of informal appreciation by creating tangible rewards
 
 Always after change code, run cargo test to ensure no errors.
 
+For Rust code:
+- Does not use println or eprintln instead use log crate
+- Try to avoid to put code in main function, it must be modular using modules and functions
+
 ## Architecture
 
 ### Core Structure
@@ -1007,3 +1011,42 @@ Requires Node.js >=18 <19 (specified in package.json engines field).
 Read @DISCORD_COMMANDS_DOCUMENTATION.md comprehensive technical specifications for all 26 Discord slash commands
   including exact parameters, validation rules, SlashCommandBuilder structures, business logic, database operations,
   and implementation details for the Rust rewrite.
+
+En los archivos @bot_db.json y guilds_db.json tienes los 2 JSONs que guarda en la DB SQLite para que puedas buscar
+  y ver como funciona la estructura de esos JSONs.
+
+Basándome en las capturas proporcionadas, aquí tienes el listado completo de comandos del bot de Discord:
+
+## Comandos del Bot de Discord
+- `/about` - Who am I? Who are you? Questions never asked.
+- `/help` - Stop it! Get some help!
+- `/ping` - Current bot ping! If the bot doesn't answer then ping is probably over 5000ms and very likely down
+- `/stats` - Look at the bot stats
+- `/support` - You need extra help? Join our support server.
+- `/suggest` - Suggest a feature or change for the bot. (Now just an advice to join the support server to suggest)
+- `/award` - Award a trophy for an user.
+- `/clear` - Clear all trophies and resets the score of an user to 0.
+- `/create` - Create a new trophy for your server.
+- `/delete` - Delete a trophy from your server.
+- `/details` - Shows the details of a trophy
+- `/edit` - Edit an existing trophy for your server.
+- `/revoke` - Revoke a trophy from an user.
+- `/show` - Show a trophy.
+- `/trophies guild` - Show the trophies any guild has.
+- `/trophies user` - Show the trophies any user has.
+- `/leaderboard` - Shows the server's leaderboard.
+- `/panel create` - Create the panel for the leaderboard.
+- `/panel delete` - Delete the panel for the leaderboard.
+- `/rewards add` - Add permissions to a role.
+- `/rewards clear` - Clears all rewards in this server.
+- `/rewards list` - List of reward roles.
+- `/rewards remove` - Remove a role reward from your server.
+- `/permissions add` - Add permissions to a role.
+- `/permissions list` - List all permissions.
+- `/permissions remove` - Remove permissions from a role.
+- `/imsafe` - Confirms you're using discord permissions instead of the deprecated custom permissions
+- `/settings list` - List all settings of the server
+- `/settings set` - Change a setting for the server.
+- `/invite` - Invite the bot to your server!
+- `/export` - Export the bot's data
+- `/forgetme` - Remove all images and data about your server from the bot and kick it.

@@ -4,12 +4,20 @@ version = "2.0.0"
 edition = "2024"
 
 [dependencies]
+# CLI and core
 clap = { version = "4.5.47", features = ["derive", "env"] }
-dotenvs = "0.1.0"
+dotenv = "0.15.0"
 env_logger = "0.11.8"
 log = "0.4.28"
-tokio = { version = "1.47.1", features = ["full"] }
-twilight-model = "0.16.0"
+tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1.0.93"
+
+# Discord API
+serenity = { version = "0.12", features = ["client", "gateway", "rustls_backend"] }
+
+# Features for future expansion
+[features]
+default = []
 
 [profile.release]
 opt-level = 3
