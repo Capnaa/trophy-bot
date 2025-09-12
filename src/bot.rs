@@ -28,6 +28,7 @@ impl Bot {
         let bot = Self { http, client };
         bot.register_commands().await?;
 
+        log::debug!("Bot {} initialized", id);
         Ok(bot)
     }
 
@@ -35,12 +36,19 @@ impl Bot {
         let command = CreateCommand::new("ping")
             .description("Test command - responds with Trophy Bot 2.0");
 
-        self.http.create_global_command(&command).await?;
+        self.http
+            .create_global_command(&command)
+            .await?;
+
         Ok(())
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        self.client.start().await?;
+        log::info!("Starting bot");
+        self.client
+            .start()
+            .await?;
+
         Ok(())
     }
 }
