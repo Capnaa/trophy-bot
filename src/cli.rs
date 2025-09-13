@@ -9,6 +9,12 @@ use serenity::client::ClientBuilder;
 pub struct Cli {
     #[arg(long, default_value_t = false, env = "DEBUG")]
     pub debug: bool,
+    #[arg(long, default_value_t = 0, env = "SHARD_START")]
+    pub shard_start: u32,
+    #[arg(long, default_value_t = 3, env = "SHARD_END")]
+    pub shard_end: u32,
+    #[arg(long, default_value_t = 4, env = "SHARD_TOTAL")]
+    pub shard_total: u32,
     #[arg(long, env = "TEST_GUILD_ID")]
     pub test_guild_id: Option<u64>,
     #[arg(long, env = "DATABASE_URL")]

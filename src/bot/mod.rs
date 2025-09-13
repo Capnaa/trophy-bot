@@ -12,6 +12,9 @@ use crate::cli::Cli;
 pub struct Bot {
     http: Http,
     client: Client,
+    shard_start: u32,
+    shard_end: u32,
+    shard_total: u32,
 }
 
 impl Bot {
@@ -34,7 +37,13 @@ impl Bot {
         }
 
         log::debug!("Bot {} initialized", id);
-        Ok(Self { http, client })
+        Ok(Self {
+            http,
+            client,
+            shard_start: args.shard_start,
+            shard_end: args.shard_end,
+            shard_total: args.shard_total,
+        })
     }
 
     fn framework(test_guild_id: Option<u64>) -> impl Framework {
@@ -61,7 +70,7 @@ impl Bot {
     pub async fn run(&mut self) -> Result<()> {
         log::info!("Starting bot");
         self.client
-            .start()
+            .start_shard_range(self.shard_start..self.shard_end, self.shard_total)
             .await?;
 
         Ok(())
