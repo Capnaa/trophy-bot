@@ -24,13 +24,13 @@ impl Cli {
         env_logger::builder()
             .filter_level(log::LevelFilter::Debug)
             .init();
-
         log::info!("Starting {} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+
         if let Err(e) = dotenv() {
             log::error!("Can not load .env file: {}", e);
         }
-
         let args: Self = Parser::parse();
+
         if args.debug {
             log::debug!("Options for bot ID {} parsed", args.bot_id);
         } else {
@@ -46,13 +46,13 @@ impl Cli {
 impl From<&Cli> for Http {
     #[inline]
     fn from(args: &Cli) -> Self {
-        Http::new(args.token.as_str())
+        Http::new(&args.token)
     }
 }
 
 impl From<&Cli> for ClientBuilder {
     #[inline]
     fn from(args: &Cli) -> Self {
-        Client::builder(args.token.as_str(), GatewayIntents::non_privileged())
+        Client::builder(&args.token, GatewayIntents::GUILDS)
     }
 }

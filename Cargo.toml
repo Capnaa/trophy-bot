@@ -14,7 +14,7 @@ anyhow = "1.0.93"
 
 # Discord API
 serenity = { version = "0.12", features = ["client", "gateway", "rustls_backend"] }
-poise = "0.6.1"
+poise = "0.6"
 
 # Features for future expansion
 [features]
