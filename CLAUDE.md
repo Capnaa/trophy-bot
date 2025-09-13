@@ -1015,7 +1015,30 @@ Read @DISCORD_COMMANDS_DOCUMENTATION.md comprehensive technical specifications f
 En los archivos @bot_db.json y guilds_db.json tienes los 2 JSONs que guarda en la DB SQLite para que puedas buscar
   y ver como funciona la estructura de esos JSONs.
 
-Basándome en las capturas proporcionadas, aquí tienes el listado completo de comandos del bot de Discord:
+Registered guild command: about
+Registered guild command: forgetme
+Registered guild command: help
+Registered guild command: imsafe
+Registered guild command: invite
+Registered guild command: ping
+Registered guild command: stats
+Registered guild command: suggest
+Registered guild command: support
+Registered guild command: award
+Registered guild command: clear
+Registered guild command: create
+Registered guild command: delete
+Registered guild command: details
+Registered guild command: edit
+Registered guild command: panel
+Registered guild command: permissions
+Registered guild command: revoke
+Registered guild command: rewards
+Registered guild command: settings
+Registered guild command: leaderboard
+Registered guild command: show
+Registered guild command: trophies
+Registered guild command: export
 
 ## Comandos del Bot de Discord
 - `/about` - Who am I? Who are you? Questions never asked.

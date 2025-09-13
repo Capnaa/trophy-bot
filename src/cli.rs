@@ -9,6 +9,8 @@ use serenity::client::ClientBuilder;
 pub struct Cli {
     #[arg(long, default_value_t = false, env = "DEBUG")]
     pub debug: bool,
+    #[arg(long, env = "TEST_GUILD_ID")]
+    pub test_guild_id: Option<u64>,
     #[arg(long, env = "DATABASE_URL")]
     pub database_url: String,
     #[arg(long, env = "DISCORD_BOT_ID")]
@@ -51,6 +53,6 @@ impl From<&Cli> for Http {
 impl From<&Cli> for ClientBuilder {
     #[inline]
     fn from(args: &Cli) -> Self {
-        Client::builder(args.token.as_str(), GatewayIntents::GUILDS)
+        Client::builder(args.token.as_str(), GatewayIntents::non_privileged())
     }
 }
