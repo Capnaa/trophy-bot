@@ -4,21 +4,19 @@ pub struct Data {} // User data, which is stored and accessible in all command i
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
-/// Displays your or another user's account creation date
+/// Displays performance stats
 #[poise::command(slash_command, prefix_command)]
-pub async fn age(
+pub async fn bench(
     ctx: Context<'_>,
-    #[description = "Selected user"] user: Option<serenity::User>,
 ) -> Result<(), Error> {
     let start = std::time::Instant::now();
     let latency = serenity::all::Timestamp::now().timestamp_millis() - ctx.created_at().timestamp_millis();
-    ctx.defer().await?;
-    tokio::task::yield_now().await;
+    //ctx.defer().await?;
+    //tokio::task::yield_now().await;
+    let time = start.elapsed().as_secs_f32();
 
-    let u = user.as_ref().unwrap_or_else(|| ctx.author());
-
-    let response = format!("{}'s account was created at {}\nlatency: {latency}ms\ntime: {}s", u.name, u.created_at(), start.elapsed().as_secs_f32());
+    let response = format!("latency: {latency}ms\ntime: {time}s");
     ctx.say(response).await?;
-    log::warn!("Command `age` was dispatched in {}s", start.elapsed().as_secs_f32());
+    log::warn!("Command `bench` dispatched in {}s", start.elapsed().as_secs_f32());
     Ok(())
 }
