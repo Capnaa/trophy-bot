@@ -24,14 +24,6 @@ impl Bot {
             .framework(Self::framework(args.test_guild_id))
             .await?;
 
-        for command in client.http.get_global_commands().await? {
-            log::warn!("Found global command: {}", command.name);
-        }
-
-        for command in client.http.get_guild_commands(1393760778972041258.into()).await? {
-            log::warn!("Found guild command: {}", command.name);
-        }
-
         log::debug!("Bot {} initialized", id);
         Ok(Self {
             client,
@@ -57,12 +49,12 @@ impl Bot {
                     if let Some(guild_id) = test_guild_id {
                         //poise::builtins::register_in_guild(ctx, &framework.options().commands, guild_id).await?;
                         GuildId::from(guild_id)
-                            .set_commands(ctx, builders)
+                            .set_commands(&ctx.http, builders)
                             .await?;
                         log::warn!("Sync commands in test guild {}", guild_id);
                     } else {
                         //poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                        Command::set_global_commands(ctx, builders).await?;
+                        Command::set_global_commands(&ctx.http, builders).await?;
                         log::info!("Sync commands globally");
                     }
                     Ok(commands::Data {})
@@ -79,6 +71,21 @@ impl Bot {
             shard_end,
             shard_total,
         } = self;
+
+        let http = client.http.clone();
+        tokio::task::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+            for command in http.get_global_commands().await? {
+                log::warn!("Found global command: {}", command.name);
+            }
+
+            for command in http.get_guild_commands(985439832388042822.into()).await? { // TODO: cambiar a guild usado en la config si esta en debug
+                log::warn!("Found guild command: {}", command.name);
+            }
+
+            Ok::<(), anyhow::Error>(())
+        });
 
         log::info!("Starting bot");
         client
