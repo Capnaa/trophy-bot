@@ -7,18 +7,23 @@ use serenity::client::ClientBuilder;
 #[derive(Parser)] // Does not implement Debug to avoid leaking sensitive info.
 #[command(version, about, long_about = None)]
 pub struct Cli {
+    /// Enable debug logging.
     #[arg(long, default_value_t = false, env = "DEBUG")]
     pub debug: bool,
+    /// To register commands in a test guild (for faster testing), set this to the guild ID.
+    #[arg(long, env = "TEST_GUILD_ID")]
+    pub test_guild_id: Option<u64>,
+
+    #[arg(long, env = "DATABASE_URL")]
+    pub database_url: String,
+
     #[arg(long, default_value_t = 0, env = "SHARD_START")]
     pub shard_start: u32,
     #[arg(long, default_value_t = 3, env = "SHARD_END")]
     pub shard_end: u32,
     #[arg(long, default_value_t = 4, env = "SHARD_TOTAL")]
     pub shard_total: u32,
-    #[arg(long, env = "TEST_GUILD_ID")]
-    pub test_guild_id: Option<u64>,
-    #[arg(long, env = "DATABASE_URL")]
-    pub database_url: String,
+
     #[arg(long, env = "DISCORD_BOT_ID")]
     pub bot_id: String,
     #[arg(long, env = "DISCORD_TOKEN")]
