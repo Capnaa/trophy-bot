@@ -13,15 +13,18 @@ pub struct Bot {
     shard_start: u32,
     shard_end: u32,
     shard_total: u32,
+    test_guild_id: Option<GuildId>,
 }
 
 impl Bot {
     #[inline]
     pub async fn new(args: &Cli) -> Result<Self> {
         let id = args.bot_id.parse()?;
+        let test_guild_id = args.test_guild_id.map(GuildId::from);
+
         let client = ClientBuilder::from(args)
             .application_id(id)
-            .framework(Self::framework(args.test_guild_id))
+            .framework(Self::framework(test_guild_id))
             .await?;
 
         log::debug!("Bot {} initialized", id);
@@ -30,11 +33,12 @@ impl Bot {
             shard_start: args.shard_start,
             shard_end: args.shard_end,
             shard_total: args.shard_total,
+            test_guild_id,
         })
     }
 
     #[inline]
-    fn framework(test_guild_id: Option<u64>) -> impl Framework {
+    fn framework(test_guild_id: Option<GuildId>) -> impl Framework {
         poise::Framework::builder()
             .options(poise::FrameworkOptions {
                 commands: vec![
@@ -48,9 +52,7 @@ impl Bot {
 
                     if let Some(guild_id) = test_guild_id {
                         //poise::builtins::register_in_guild(ctx, &framework.options().commands, guild_id).await?;
-                        GuildId::from(guild_id)
-                            .set_commands(&ctx.http, builders)
-                            .await?;
+                        guild_id.set_commands(&ctx.http, builders).await?;
                         log::warn!("Sync commands in test guild {}", guild_id);
                     } else {
                         //poise::builtins::register_globally(ctx, &framework.options().commands).await?;
@@ -70,18 +72,21 @@ impl Bot {
             shard_start,
             shard_end,
             shard_total,
+            test_guild_id,
         } = self;
 
         let http = client.http.clone();
         tokio::task::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
-            for command in http.get_global_commands().await? {
-                log::warn!("Found global command: {}", command.name);
-            }
-
-            for command in http.get_guild_commands(985439832388042822.into()).await? { // TODO: cambiar a guild usado en la config si esta en debug
-                log::warn!("Found guild command: {}", command.name);
+            if let Some(guild_id) = test_guild_id {
+                for command in http.get_guild_commands(guild_id).await? { // TODO: cambiar a guild usado en la config si esta en debug
+                    log::warn!("Found guild command: {}", command.name);
+                }
+            } else {
+                for command in http.get_global_commands().await? {
+                    log::warn!("Found global command: {}", command.name);
+                }
             }
 
             Ok::<(), anyhow::Error>(())
