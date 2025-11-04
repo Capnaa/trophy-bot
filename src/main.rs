@@ -1,5 +1,6 @@
 mod cli;
 mod bot;
+mod legacy;
 
 use cli::Cli;
 use bot::Bot;
