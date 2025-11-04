@@ -135,6 +135,7 @@ json.sqlite
 images/
 
 .env
+.env.*
 
 .DS_Store
 Thumbs.db
