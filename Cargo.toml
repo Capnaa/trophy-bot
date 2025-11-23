@@ -15,10 +15,12 @@ anyhow = "1.0.93"
 # DB
 sea-orm = { version = "2.0.0-rc", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros" ] }
 serde_json = "1.0"
+sea-orm-migration = { version = "2.0.0-rc", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"] }
 
 # Discord API
 serenity = { version = "0.12", features = ["client", "gateway", "rustls_backend"] }
 poise = "0.6"
+sea-orm-cli = "2.0.0-rc.18"
 
 # Features for future expansion
 [features]

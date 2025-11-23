@@ -28,6 +28,10 @@ pub struct Cli {
     pub bot_id: String,
     #[arg(long, env = "DISCORD_TOKEN")]
     token: String, // Avoid to make it public for security reasons.
+
+    // Subcommand migrate
+    #[command(subcommand)]
+    pub command: Option<crate::migrations::MigrateSubcommands>,
 }
 
 impl Cli {

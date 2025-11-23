@@ -2,6 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 📚 Documentation Structure
+
+This repository contains multiple documentation files for different purposes:
+
+- **CLAUDE.md** (this file) - High-level project overview, architecture, and development guidelines
+- **MIGRATION.md** - Detailed data migration strategy from Node.js/quick.db to Rust/SeaORM (production statistics, algorithms, validation)
+- **COMMAND_IMPLEMENTATIONS.md** - Quick reference mapping each slash command to its Node.js implementation file
+- **DISCORD_COMMANDS_DOCUMENTATION.md** - Comprehensive command specifications with parameters, validation rules, and business logic
+- **COMMANDS_AND_FUNCTIONALITY.md** - Summary of bot commands, events, and data structures
+
+**When implementing Rust commands:** Refer to DISCORD_COMMANDS_DOCUMENTATION.md for full specifications, then check COMMAND_IMPLEMENTATIONS.md to find the corresponding Node.js file for implementation details.
+
 ## Project Overview
 
 Trophy Bot is a **gamification and community recognition system** for Discord servers. It transforms subjective appreciation into a structured achievement system where:
@@ -343,172 +355,203 @@ Required environment variables (see `.env.example`):
 - All server data lives in single JSON blob (major scalability bottleneck)
 - **MUST implement proper normalized database design for production scale**
 
-### Recommended Rust Architecture
+### Rust Architecture (ACTUAL IMPLEMENTATION)
 
-**Technology Stack:**
-- **Discord API**: [Twilight](https://twilight.rs/) - Powerful, flexible, scalable ecosystem for Discord bots
-- **Database**: [SQLx](https://github.com/launchbadge/sqlx) - Compile-time checked SQL queries with PostgreSQL/SQLite
-- **ORM Alternative**: Direct SQLx for type-safe, performant database operations
+**Technology Stack (Current):**
+- **Discord API**: [Serenity](https://github.com/serenity-rs/serenity) v0.12 + [Poise](https://github.com/serenity-rs/poise) v0.6
+- **Database ORM**: [SeaORM](https://www.sea-ql.org/SeaORM/) v2.0-rc with migrations
+- **Database Support**: SQLite (development) + PostgreSQL (production)
+- **CLI**: clap v4 with derive features for subcommands
+- **Async Runtime**: Tokio with multi-threaded flavor
 
 **Key Advantages Over Node.js Version:**
-- **Compile-time SQL validation** - Catch database errors at build time
+- **Type-safe ORM** - SeaORM provides compile-time checked queries with ActiveModel pattern
+- **Migration System** - Built-in migration management via `cargo run -- migrate up/down/status`
 - **True async/await** with Rust's superior async runtime (Tokio)
 - **Memory safety** - No garbage collection, predictable resource usage
 - **Performance** - 10-100x faster than Node.js for database operations
 - **Scalability** - Handle thousands of concurrent Discord interactions
 
-## Normalized Database Schema for Rust Rewrite
+**Current Implementation Status:**
+- ✅ CLI structure with migration subcommands (`src/cli.rs`, `src/migrations/mod.rs`)
+- ✅ Legacy data loader from quick.db (`src/legacy/mod.rs`)
+- ✅ SeaORM migration infrastructure (`src/migrations/`)
+- ✅ Bot framework with Serenity + Poise (`src/bot/mod.rs`)
+- ⚠️ Basic migration schema exists but needs completion
+- ❌ No production commands implemented yet (only demo `bench` command)
+- ❌ Data migration script not yet implemented
 
-### Recommended SQLx Schema Design
+**Project Structure:**
+```
+src/
+├── main.rs              # Entry point, routes to bot or migration
+├── cli.rs               # CLI argument parsing with migrate subcommand
+├── bot/
+│   ├── mod.rs           # Bot initialization and framework setup
+│   └── commands.rs      # Poise command implementations
+├── legacy/
+│   └── mod.rs           # Loads JSON from quick.db SQLite (production data)
+└── migrations/
+    ├── mod.rs           # SeaORM Migrator trait implementation
+    └── m20251115_000001_create_basic_tables.rs  # Example migration
+```
 
-**Core Tables:**
+## Normalized Database Schema (SeaORM)
+
+**⚠️ IMPORTANT:** The actual schema is defined in `migrations/001_initial_schema.sql` and managed via SeaORM migrations.
+**See `MIGRATION.md`** for the complete migration strategy including legacy_id mapping and data import algorithm.
+
+### Database Schema Overview
+
+**Schema Management:**
+- Migrations live in `src/migrations/` as Rust files using SeaORM's migration API
+- Run migrations: `cargo run -- migrate up`
+- Check status: `cargo run -- migrate status`
+- Rollback: `cargo run -- migrate down`
+
+**Core Tables (7 total):**
+
+1. **guilds** - Discord server configurations
+2. **trophies** - Trophy definitions with legacy_id mapping
+3. **user_trophies** - Award records (allows duplicates for multiple awards)
+4. **guild_settings** - Per-guild configuration (5 settings)
+5. **role_rewards** - Automatic role assignment rules
+6. **leaderboard_panels** - Persistent leaderboard messages
+7. **bot_stats** - Global statistics and command counters
+
+**Key Design Decisions:**
+- `trophies.legacy_id` - Maps old string IDs ("1", "2") to new SERIAL integers
+- NO UNIQUE constraint on `(user_id, trophy_id)` - duplicates are required functionality
+- `user_trophies.awarded_at` - Synthetic timestamps for migrated data (legacy system didn't track)
+- Soft deletes with `deleted_at` columns (Laravel-style)
+- Foreign keys with CASCADE for automatic cleanup
+
+**Schema Definition (Example from migrations/001_initial_schema.sql):**
 ```sql
 -- Guilds table
 CREATE TABLE guilds (
     id BIGINT PRIMARY KEY,
     name VARCHAR(100),
-    language VARCHAR(10) DEFAULT 'en',
     is_safe BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP NULL
 );
 
--- Trophy definitions per guild
+-- Trophies with legacy ID mapping
 CREATE TABLE trophies (
     id SERIAL PRIMARY KEY,
-    guild_id BIGINT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+    guild_id BIGINT NOT NULL,
     creator_user_id BIGINT NOT NULL,
     name VARCHAR(32) NOT NULL,
-    description VARCHAR(128),
+    description VARCHAR(128) DEFAULT 'No description provided',
     emoji VARCHAR(64) DEFAULT '🏆',
     value INTEGER CHECK (value BETWEEN -999999 AND 999999) DEFAULT 10,
-    image_filename VARCHAR(255),
-    dedication_user_id BIGINT,
-    dedication_text VARCHAR(32),
-    details VARCHAR(300),
+    image_filename VARCHAR(255) NULL,
+    dedication_user_id BIGINT NULL,
+    dedication_text VARCHAR(32) NULL,
+    details VARCHAR(300) DEFAULT 'No details provided.',
     signed BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
-    UNIQUE(guild_id, name)  -- Prevent duplicate names per guild
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP NULL,
+
+    CONSTRAINT fk_trophies_guild FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE,
+    CONSTRAINT unique_guild_trophy_name UNIQUE(guild_id, name)
 );
 
--- User trophy awards (many-to-many)
+-- User trophy awards (DUPLICATES ALLOWED)
 CREATE TABLE user_trophies (
     id SERIAL PRIMARY KEY,
-    guild_id BIGINT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
+    guild_id BIGINT NOT NULL,
     user_id BIGINT NOT NULL,
-    trophy_id INTEGER NOT NULL REFERENCES trophies(id) ON DELETE CASCADE,
+    trophy_id INTEGER NOT NULL,
     awarded_by BIGINT NOT NULL,
-    awarded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
-    INDEX idx_user_guild (guild_id, user_id),
-    INDEX idx_trophy_lookup (trophy_id)
-);
-
--- Guild settings
-CREATE TABLE guild_settings (
-    guild_id BIGINT PRIMARY KEY REFERENCES guilds(id) ON DELETE CASCADE,
-    dedication_display SMALLINT DEFAULT 2,
-    stack_roles SMALLINT DEFAULT 1,
-    hide_unused_trophies SMALLINT DEFAULT 1,
-    hide_quit_users SMALLINT DEFAULT 0,
-    leaderboard_format SMALLINT DEFAULT 0
-);
-
--- Role rewards
-CREATE TABLE role_rewards (
-    id SERIAL PRIMARY KEY,
-    guild_id BIGINT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
-    role_id BIGINT NOT NULL,
-    requirement INTEGER NOT NULL CHECK (requirement >= 1),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
-    UNIQUE(guild_id, role_id)
-);
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP NULL,
 
--- Leaderboard panels
-CREATE TABLE leaderboard_panels (
-    guild_id BIGINT PRIMARY KEY REFERENCES guilds(id) ON DELETE CASCADE,
-    channel_id BIGINT NOT NULL,
-    message_id BIGINT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Global bot statistics
-CREATE TABLE bot_stats (
-    key VARCHAR(50) PRIMARY KEY,
-    value BIGINT DEFAULT 0,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    CONSTRAINT fk_user_trophies_guild FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE,
+    CONSTRAINT fk_user_trophies_trophy FOREIGN KEY (trophy_id) REFERENCES trophies(id) ON DELETE CASCADE
+    -- NO UNIQUE CONSTRAINT - duplicates required for multiple awards
 );
 ```
 
-### Performance Optimizations
+**See `migrations/001_initial_schema.sql` for the complete schema including:**
+- guild_settings table (5 configuration options)
+- role_rewards table (automatic role assignment)
+- leaderboard_panels table (persistent leaderboard messages)
+- bot_stats table (command counters and statistics)
+- command_logs table (analytics and debugging)
+- Indexes for performance optimization
+- Triggers for updated_at maintenance
 
-**Indexes for Common Queries:**
-```sql
--- Leaderboard queries (most frequent)
-CREATE INDEX idx_user_score ON user_trophies (guild_id, user_id);
+### SeaORM Implementation Patterns
 
--- Trophy lookup by name/ID
-CREATE INDEX idx_trophy_name ON trophies (guild_id, name);
-
--- Award history
-CREATE INDEX idx_awards_by_date ON user_trophies (guild_id, awarded_at DESC);
-
--- Role rewards lookup
-CREATE INDEX idx_role_rewards ON role_rewards (guild_id, requirement);
-```
-
-### SQLx Implementation Patterns
-
-**Type-Safe Queries:**
+**Active Model Pattern (Create/Update):**
 ```rust
-// Get user trophy count with compile-time validation
-#[derive(sqlx::FromRow)]
-struct UserScore {
-    user_id: i64,
-    total_score: i64,
-    trophy_count: i64,
-}
+use sea_orm::{ActiveModelTrait, Set};
+use entities::{guilds, trophies};
 
-let user_score = sqlx::query_as!(
-    UserScore,
-    r#"
-    SELECT 
-        user_id,
-        SUM(t.value) as "total_score!",
-        COUNT(*) as "trophy_count!"
-    FROM user_trophies ut
-    JOIN trophies t ON ut.trophy_id = t.id
-    WHERE ut.guild_id = $1 AND ut.user_id = $2
-    GROUP BY user_id
-    "#,
-    guild_id,
-    user_id
-).fetch_optional(&pool).await?;
+// Insert a new trophy
+let new_trophy = trophies::ActiveModel {
+    guild_id: Set(guild_id),
+    name: Set("Golden Medal".to_string()),
+    description: Set("Awarded for excellence".to_string()),
+    value: Set(100),
+    ..Default::default()
+};
+
+let inserted = new_trophy.insert(&db).await?;
+let trophy_id = inserted.id;
 ```
 
-**Efficient Leaderboard Query:**
+**Entity Queries (Read):**
 ```rust
-let leaderboard = sqlx::query_as!(
-    LeaderboardEntry,
-    r#"
-    SELECT 
-        user_id,
-        SUM(t.value) as "total_score!",
-        COUNT(*) as "trophy_count!",
-        RANK() OVER (ORDER BY SUM(t.value) DESC) as "rank!"
-    FROM user_trophies ut
-    JOIN trophies t ON ut.trophy_id = t.id
-    WHERE ut.guild_id = $1
-    GROUP BY user_id
-    ORDER BY total_score DESC
-    LIMIT $2 OFFSET $3
-    "#,
-    guild_id,
-    limit,
-    offset
-).fetch_all(&pool).await?;
+use sea_orm::{EntityTrait, QueryFilter, QuerySelect, ColumnTrait};
+use entities::{user_trophies, trophies};
+
+// Find all user trophies with trophy details
+let user_awards = user_trophies::Entity::find()
+    .filter(user_trophies::Column::UserId.eq(user_id))
+    .filter(user_trophies::Column::GuildId.eq(guild_id))
+    .find_also_related(trophies::Entity)
+    .all(&db)
+    .await?;
+
+// Calculate user score
+use sea_orm::sea_query::{Expr, Func};
+
+let score: Option<i64> = user_trophies::Entity::find()
+    .select_only()
+    .column_as(Expr::col(trophies::Column::Value).sum(), "total")
+    .filter(user_trophies::Column::UserId.eq(user_id))
+    .filter(user_trophies::Column::GuildId.eq(guild_id))
+    .join(JoinType::InnerJoin, user_trophies::Relation::Trophies)
+    .into_tuple::<i64>()
+    .one(&db)
+    .await?;
+```
+
+**Transaction Example:**
+```rust
+use sea_orm::TransactionTrait;
+
+let txn = db.begin().await?;
+
+// Award trophy
+let award = user_trophies::ActiveModel {
+    guild_id: Set(guild_id),
+    user_id: Set(user_id),
+    trophy_id: Set(trophy_id),
+    ..Default::default()
+};
+award.insert(&txn).await?;
+
+// Update role rewards based on new score
+update_role_rewards(&txn, guild_id, user_id).await?;
+
+txn.commit().await?;
 ```
 
 ### Migration Benefits
@@ -527,16 +570,28 @@ let leaderboard = sqlx::query_as!(
 
 ## Data Migration Strategy (JSON SQLite → Normalized DB)
 
+**⚠️ IMPORTANT:** This section provides a brief overview. For the complete migration strategy, see `MIGRATION.md` which contains:
+- Verified production statistics (2,493 guilds, 10,853 trophies, 60,554 awards)
+- 5 critical issues and their solutions
+- Complete PostgreSQL schema with SeaORM
+- 8-phase migration algorithm with SeaORM Active Models
+- Validation strategy and rollback plan
+
 ### Migration Overview
+
+**Current Implementation:**
+- Legacy data loader: `src/legacy/mod.rs` reads from `sqlite://json.sqlite`
+- Exposes `LegacyData` struct with `.bot()` and `.guilds()` methods
+- Serde JSON deserialization for type-safe access
 
 **Critical Challenge**: The current system stores ALL data as JSON in 2 SQLite tables:
 ```sql
--- Current structure
+-- Current structure (quick.db)
 bot: {"data": {"version": 0, "commands": {...}, "trophies": 123, ...}}
 guilds: {"data": {"guild1": {"trophies": {...}, "users": {...}}, "guild2": {...}}}
 ```
 
-**Target**: Normalize this into 7+ properly structured tables with relationships.
+**Target**: Normalize into 7 tables with SeaORM entities and proper relationships.
 
 ### Pre-Migration Analysis
 
