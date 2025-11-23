@@ -8,10 +8,11 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .create_table(Table::create()
-                .table("banned_users")
+                .table("bot_stats")
                 .if_not_exists()
                 .col(ColumnDef::new("id").integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new("data").string().not_null())
+                .col(ColumnDef::new("name").string().not_null().unique_key())
+                .col(ColumnDef::new("total").big_unsigned().not_null().default(0))
                 .to_owned())
             .await?;
 
@@ -19,11 +20,19 @@ impl MigrationTrait for Migration {
             .create_table(Table::create()
                 .table("guilds")
                 .if_not_exists()
-                .col(ColumnDef::new("id").integer().not_null().auto_increment().primary_key())
-                .col(ColumnDef::new("gid").string().not_null())
-                .col(ColumnDef::new("users").integer().not_null())
+                .col(ColumnDef::new("id").string().not_null().primary_key())
                 .to_owned())
             .await?;
+
+        if let Some(legacy) = crate::legacy::LegacyData::load().await {
+            let mut query = Query::insert();
+            query.into_table("bot_stats")
+                .columns(vec!["name", "total"]);
+            for (name, total) in legacy.bot_stats() {
+                query.values_panic(vec![name.into(), total.into()]);
+            }
+            manager.execute(query).await?;
+        }
 
         Ok(())
     }
@@ -31,7 +40,7 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .drop_table(Table::drop()
-                .table("banned_users")
+                .table("bot_stats")
                 .if_exists()
                 .to_owned())
             .await?;

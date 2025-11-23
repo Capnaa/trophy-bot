@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
         return migrations::cli(args).await;
     }
 
-    let legacy = legacy::LegacyData::load().await;
+    let legacy = legacy::LegacyData::load().await.unwrap();
     //println!("{}", serde_json::to_string_pretty(&legacy.guild(985439832388042822u64)).unwrap());
     println!("{}", serde_json::to_string_pretty(&legacy.guilds()[0]).unwrap());
     //return Ok(());
