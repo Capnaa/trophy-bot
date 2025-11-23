@@ -134,8 +134,13 @@ json.sqlite
 
 images/
 
+# Environment config (with secrets)
+
 .env
-.env.*
+.env.prod
+.env*
+
+# Other files to ignore
 
 .DS_Store
 Thumbs.db
