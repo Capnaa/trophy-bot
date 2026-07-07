@@ -40,7 +40,7 @@ Every slash command of the production bot, what it REALLY does (validated agains
 | `/export` | Admin-only; dumps raw guild JSON as a public attachment | Should be ephemeral; export normalized data |
 | `/panel create/delete` | Persistent leaderboard message; refreshed only by a background loop (60s + 1s/guild ≈ 42 min full cycle at 2,500 guilds) | Creating a 2nd panel orphans the old message; delete leaves the message; 0-score users hidden |
 | `/permissions add/list/remove` | Static deprecation notice only | Not reimplemented |
-| `/rewards add/remove/clear/list` | Role rewards by score threshold (min 1), sorted desc, list 5/page | Hierarchy check always false (operator precedence); duplicate roles allowed; limit is 21 not 20; deleted-role rewards unremovable; **and role assignment itself is dead under d.js v14** (see below) |
+| `/rewards add/remove/clear/list` | Role rewards by score threshold (min 1), sorted desc, list 5/page | Hierarchy check always false (operator precedence); duplicate roles allowed; limit is 21 not 20; deleted-role rewards unremovable; role assignment dead except in Administrator guilds (see below) |
 | `/settings set/list` | 5 settings stored as 0-based index; accepts option number or substring name | Defaults validated: `dedication_display=2, stack_roles=1, hide_unused_trophies=1, hide_quit_users=0, leaderboard_format=0` |
 
 ## User-facing — [commands-user.md](commands-user.md)

@@ -120,7 +120,9 @@ Users may notice these; everything else must feel identical.
 - **Tests are part of parity**: every F-item in §3 gets at least one test; the import gets count/score validation tests against fixture data shaped like the real anomalies (data-model-legacy.md).
 - **Graceful shutdown** (ADR 0009) covers background workers (panel updater) too.
 
-## 6. Acceptance criteria (cutover gate)
+## 6. Acceptance criteria
+
+Ordered by current staging: items 2–3 are the near-term goal (code + import proven locally on SQLite); items 1, 4 and 5 gate the eventual cutover, which is deferred until command parity is complete.
 
 1. All commands in §1 registered and responding on a test guild with production-shaped imported data.
 2. Import report reviewed: counts match (10,853 trophies, 60,554 awards − orphans), renames and score corrections audited (migration-import.md).
