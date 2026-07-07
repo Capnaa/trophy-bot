@@ -16,7 +16,7 @@ quick.db uses one SQLite file (`json.sqlite`) with two tables, `bot` and `guilds
 | Trophies created (real count) | 10,853 |
 | Current awards (sum of user array lengths; all elements are strings) | 60,554 |
 | Orphaned awards (referencing nonexistent trophy IDs) | **0** |
-| Users with a `trophies` array | 9,583 (8,299 non-empty, 1,284 empty) |
+| Users with a `trophies` array | 9,583 (8,299 non-empty, 1,284 empty — empty records also come from no-op revokes, which wrote `{trophies: [], trophyValue: 0}` for unknown users) |
 | Users whose stored `trophyValue` ≠ recalculated sum | 54 (drift −990..+3,500) |
 | Guilds with zero trophies | 393 |
 | Duplicate-name groups (Unicode-aware normalization, ADR 0005) | 286 groups / 641 trophies / 209 guilds |

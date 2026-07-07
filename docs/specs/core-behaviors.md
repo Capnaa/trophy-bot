@@ -1,7 +1,8 @@
 # Trophy Bot — Core & Event System: Validated Behavior Spec
 
 Source of truth: the JavaScript code at `globals.js`, `index.js` and `events/*.js`
-(discord.js 14.6, quick.db 7.1.3), read completely and validated on 2026-07-07.
+(discord.js 14.21.0 as resolved by package-lock.json — what `npm ci` deploys; package.json
+declares `^14.6.0` — quick.db 7.1.3), read completely and validated on 2026-07-07.
 The prior markdown docs (CLAUDE.md, DISCORD_COMMANDS_DOCUMENTATION.md,
 COMMANDS_AND_FUNCTIONALITY.md) were AI-generated and contain errors; where they
 disagree with the code, this document wins. `TrophyBot-Copy/` is a backup and was ignored.
@@ -25,8 +26,10 @@ The superseded documents referenced in the discrepancy sections live in `docs/ar
 `events/ready.js` (once):
 
 1. Fetches `client.errorChannel` = channel `985869722199416862` and
-   `client.suggestionChannel` = channel `985872094153830400` (try/catch — silently null
-   if unavailable) (ready.js:11-15). `suggestionChannel` is never used anywhere.
+   `client.suggestionChannel` = channel `985872094153830400` (ready.js:11-15). Both
+   fetches share a single try/catch, so a failed `errorChannel` fetch leaves it
+   **undefined** (not null) *and* skips the `suggestionChannel` fetch — see dispatch
+   step 8 for the fallout. `suggestionChannel` is never used anywhere.
 2. Loads commands via `fetchModules('../commands', '.js', true)` and languages from
    `../locale/languages` into `client.commands` / `client.languages` (languages are
    effectively unused — the language system is disabled).
@@ -63,7 +66,9 @@ commands**. Uses `@discordjs/rest` with API v9 routes.
 5. Fetches the invoking member; computes `roles` (role-ID array) and `isAdmin` — **both
    dead code**, never used. The `isAdmin` check uses the v13 string `'ADMINISTRATOR'`
    against v14 `toArray()` output (`'Administrator'`), so it would always be false anyway
-   (command.js:36-37).
+   (command.js:36-37). Dead or not, the `isAdmin` computation still costs a live
+   `client.channels.fetch()` on every dispatch (command.js:37) — and that fetch runs
+   before the try/catch, so its rejection is a process-crash hazard (see Bug #1).
 6. **imsafe gate** (command.js:39-44): if the command module declares a `permissions`
    array AND the invoker is not the dev (`isDev`), read
    `data.${guild}.imsafe ?? false`; if falsy, reply with `imsafeWarning` and stop.
@@ -76,10 +81,15 @@ commands**. Uses `@discordjs/rest` with API v9 routes.
    `data.commands.total` (command.js:46-49). Counted **before** execution, so failed
    commands still count.
 8. `await command.run(interaction)` inside try/catch. On error:
-   - `console.error`, then if `client.errorChannel` exists, sends an embed there with the
-     command string, "perpetrator" user ID, guild ID, and the first 900 chars of the
-     stacktrace (command.js:57-76). If *that* send fails, posts
-     "Error log could not be sent..." to the invocation channel.
+   - `console.error`, then if `client.errorChannel !== null` (command.js:57), sends an
+     embed there with the command string, "perpetrator" user ID, guild ID, and the first
+     900 chars of the stacktrace (command.js:57-76). If *that* send fails, posts
+     "Error log could not be sent, dev should know about this..." to the invocation
+     channel (command.js:72-75). **The guard is `!== null`, but ready.js leaves
+     `client.errorChannel` undefined when its fetch throws — undefined passes the
+     check.** Net effect: when the error channel is unreachable (e.g. running the
+     legacy bot locally during migration testing), every command error publicly posts
+     the "Error log could not be sent..." message into the invoking channel.
    - Edits the reply with a red embed pointing to the support server, footer noting
      errors are auto-delivered to the developer (command.js:81-86).
 9. **No cooldown enforcement exists.** `cooldown: 10` is declared on `stats` and `suggest`
@@ -109,8 +119,10 @@ commands**. Uses `@discordjs/rest` with API v9 routes.
 - `guildDelete` (`leave.js`): `console.log("Left a guild!")` only. No data cleanup, no
   tracking.
 - `guildMemberAdd` (`user.js`): support-server-only welcome role. If the member is not a
-  bot and the guild is `985439832388042822`, adds role `985440033286787123` (try/catch
-  swallowed). Nothing to do with role rewards.
+  bot and the guild is `985439832388042822`, adds role `985440033286787123`. The
+  `member.roles.add()` (user.js:16) is **not awaited**, so the surrounding try/catch does
+  NOT catch its rejection — it escapes as an unhandled promise rejection (see Bug #1's
+  crash-surface note). Nothing to do with role rewards.
 - `interactionCreate`: handled twice (command.js + button.js, above).
 
 ## Background tasks
@@ -330,8 +342,9 @@ Deletes each trophy's image file from `./images/`, sets `data.${guild.id} = -1`
   support-server welcome role `985440033286787123`.
 - Dev ID: `353998390734094346`.
 - Pagination: 10 per page (leaderboard, trophy lists, panel); rewards list 5 per page.
-- Other limits (150 trophies/guild, 20 rewards, 1-50 award count, field lengths, 1 MB
-  images) live in the individual commands, not in globals.
+- Other limits (150 trophies/guild, effectively 21 rewards — rewards.js:86 checks `> 20`
+  *before* pushing, see the commands-admin.md off-by-one finding — 1-50 award count,
+  field lengths, 1 MB images) live in the individual commands, not in globals.
 
 ## Bugs & quirks found
 
@@ -341,7 +354,10 @@ Deletes each trophy's image file from `./images/`, sets `data.${guild.id} = -1`
    (globals.js:177-182). EXCEPTION: v14's `has()` short-circuits on Administrator
    before resolving the flag string, so in guilds that granted the bot an
    Administrator role the function executes fully and role rewards WORK. Verified
-   empirically on the deployed discord.js 14.6.0. The stock invite URL grants
+   empirically on the deployed discord.js 14.21.0 (the package-lock.json resolution
+   installed by `npm ci`; package.json declares `^14.6.0`) — the `has()` short-circuit
+   behavior is identical in 14.6 and 14.21, so the Administrator-exception claims stand
+   for either version. The stock invite URL grants
    neither ManageRoles nor Administrator, so default-invited guilds have dead
    rewards. Additional hazard: doRewardRoles is invoked WITHOUT await inside
    try/catch from award/revoke/clear, so in Administrator guilds a rejected
@@ -349,6 +365,19 @@ Deletes each trophy's image file from `./images/`, sets `data.${guild.id} = -1`
    promise rejection, which crashes the process under Node 18 defaults.
    (`guild.me` is removed in v14, but the fallback
    `guild.members.fetch(client.user.id)` works.)
+   The crash surface is wider than doRewardRoles: **no event handler has a top-level
+   catch** — index.js:36-55 binds `(...args) => event.run(...args)` bare — so any
+   rejection outside a handler's own try/catch also crashes the process under Node 18
+   defaults. Concretely: events/command.js:14 `deferReply()` (expired or double-acked
+   interaction), command.js:21 → getServer's unconditional `guild.fetch()`
+   (globals.js:407), command.js:29 `interaction.member.fetch()`, and command.js:37's
+   dead-code `client.channels.fetch()` all run BEFORE the try/catch that wraps only
+   `command.run`; events/user.js:16 `member.roles.add()` is not awaited, so its
+   surrounding try/catch never sees the rejection; events/join.js:11
+   `await guild.members.fetch()` has no catch at all. (Note the dead-code `isAdmin`
+   computation still costs a live channel fetch on every command dispatch.) Rust
+   target: every event/dispatch path must be wrapped — already reflected in
+   rust-parity-plan.md §2.
 2. **BUG — cooldowns are never enforced.** `cooldown: 10` on stats/suggest,
    `client.cooldowns` collection, and `showCooldown()` all exist; nothing checks them.
 3. **BUG — "Always Name" dedication never uses the live username**: `user?.username` on a
@@ -425,6 +454,9 @@ Deletes each trophy's image file from `./images/`, sets `data.${guild.id} = -1`
 
 ## Rust target notes
 
+- **Error containment**: every event/dispatch path must be wrapped in a top-level catch —
+  the JS bot binds handlers bare and crashes on any stray rejection (Bug #1's
+  crash-surface note). Already reflected in rust-parity-plan.md §2.
 - **Poise replaces**: `fetchModules` + REST registration (framework command registration),
   the dispatch/permission flow (`default_member_permissions`, `guild_only`), cooldowns
   (declare 10 s on stats/suggest and make them real), and error hooks (`on_error` →
