@@ -4,14 +4,17 @@ Validated against the JavaScript source code (the ONLY source of truth) on 2026-
 Files audited in full: `commands/users/leaderboard.js`, `commands/users/show.js`,
 `commands/users/trophies.js`, `commands/users/trophystats.js`, plus the shared helpers in
 `globals.js` and the dispatcher `events/command.js`. Production data shapes were verified
-against `guilds_db.json` (2,493 guilds / 10,853 trophies / 60,554 award entries).
+against `guilds_db.json` (2,488 valid guild objects / 10,853 trophies / 60,554 award entries).
+Note: 5 of the file's 2,493 top-level keys hold the literal integer `-1` (forgetme tombstones,
+written at `globals.js:380` and special-cased by `getServer` at `globals.js:417-419`) — full
+detail in `data-model-legacy.md`.
 The superseded documents referenced in the discrepancy sections live in `docs/archive/`.
 
 **Shared dispatcher behavior (applies to all commands below):**
 - Every command is publicly deferred with `interaction.deferReply()` (`events/command.js:14`) — no user command here is ephemeral.
 - `getServer()` initializes the guild's DB structure before any command runs (`events/command.js:21`, `globals.js:405-447`), so guild data paths always exist after first interaction.
-- None of the three user command modules define a `permissions` array or `cooldown` field, so the `imsafe` gate (`events/command.js:39-44`) and cooldowns do NOT apply to them.
-- BUG (framework-wide): the admin check builds `permissionsFor(member).toArray()` and looks for `'ADMINISTRATOR'` (`events/command.js:37`). discord.js v14 returns PascalCase flag names (`'Administrator'`), so this check is **always false** in v14. It also affects `/trophies guild` (see below).
+- None of the three user command modules define a `permissions` array, so the `imsafe` gate (`events/command.js:39-44`) does NOT apply to them. Cooldowns are dead framework-wide anyway: `events/command.js` contains no cooldown logic and `client.cooldowns` (`ready.js:28`) is never read, so no command's declared `cooldown` field was ever enforced.
+- BUG (framework-wide): the dispatcher computes `roles` (`events/command.js:36`) and `isAdmin` via `permissionsFor(member).toArray()` looking for `'ADMINISTRATOR'` (`events/command.js:37`), but **neither value is ever used in the dispatcher** — dead code. discord.js v14 returns PascalCase flag names (`'Administrator'`), so the check is **always false** in v14; the string-case bug's only observable effect is at `trophies.js:106` (see `/trophies guild` below).
 
 ---
 
@@ -53,11 +56,11 @@ Note: `updatePanel` (`globals.js:602-656`) contains a copy-pasted duplicate of t
 - Read `data.${guild}.settings.leaderboard_format`
 
 ### Edge cases, quirks and bugs
-- **BUG — rank numbering ignores page clamping**: request `page: 999` on a 2-page board and `getPage` shows page 2's users, but ranks start at 9981 and the footer says "Page 2 of 2". Request `page: -3` (truthy, so `|| 1` doesn't apply) and page 1's users are shown with ranks starting at −29 and no medals (`leaderboard.js:38` vs `globals.js:594`).
+- **BUG — rank numbering ignores page clamping**: request `page: 999` on a 2-page board and `getPage` shows page 2's users, but ranks start at 9981 and the footer says "Page 2 of 2". Request `page: -3` (truthy, so `|| 1` doesn't apply) and page 1's users are shown with ranks starting at −39 (`((-3−1)×10)+1`) and no medals (`leaderboard.js:38` vs `globals.js:594`).
 - **BUG — formats 1/2/3 crash on departed users**: `parseFormat` calls `guild.members.fetch(id)` with no try/catch (`globals.js:153,157,161`). With "Show Quit Users" enabled (or a stale cache), a departed user makes the fetch reject, the whole command throws, and the user sees the generic error embed. The `pre = "Unknown User"` fallback (`globals.js:149`) is unreachable for missing members because fetch throws instead of returning null.
 - **QUIRK — zero-score users are invisible**: the truthiness filter (`leaderboard.js:27`) hides anyone with score 0, even active members who earned and then lost points. Negative totals ARE shown (negative numbers are truthy).
 - **QUIRK — "Total server score" is not the server total**: it is the sum of currently *visible* rows only, so it changes when members leave (with hide_quit_users) and never counts zero-score users.
-- **QUIRK — quit detection is cache-dependent**: `isInServer` only checks the member cache; `attemptFetchIfCacheCleared`'s heuristic (`keys.length > cacheUsers`) can skip the fetch when the cache is partially populated but larger than the DB user count, silently hiding present members or showing absent ones.
+- **QUIRK — quit detection is cache-dependent**: `isInServer` only checks the member cache; `attemptFetchIfCacheCleared`'s heuristic (`keys.length > cacheUsers`) can skip the fetch when the cache is partially populated but larger than the DB user count, silently hiding present members or showing absent ones. The dispatcher also fires `AttemptToFetchUsers(client)` un-awaited on EVERY command (`events/command.js:24`, `globals.js:482-496`): when the day-of-month changes it fetches ALL members of ALL guilds, so `isInServer`/`hide_quit_users` accuracy is bounded by this at-most-daily global refresh.
 
 ### Discrepancies with prior docs
 - DISCORD_COMMANDS_DOCUMENTATION.md claims "Medal emojis for top positions" / CLAUDE.md claims "validated page ranges" — rank/medal computation is NOT validated against the clamped page (bug above).
@@ -89,7 +92,7 @@ Permissions: none. Cooldown: none. Reply: public embed, possibly with a file att
 
 ### Current behavior (validated)
 1. Resolves the input with `getTrophy` (`show.js:19`, `globals.js:121-147`):
-   - If `parseInt(input)` is a number AND that key exists under `data.${guild}.trophies`, that ID wins immediately (`globals.js:122-129`).
+   - If `parseInt(input)` is a number AND the **raw input string** exists as a key under `data.${guild}.trophies` (`globals.js:125`), that ID wins immediately (`globals.js:122-129`).
    - Otherwise fuzzy name match: both input and each trophy name are normalized by `parseName` — lowercased with all non-word characters stripped (`globals.js:237-240`) — and a trophy matches if its normalized name **contains** the normalized input as a substring (`checkName`, `globals.js:242-244`). The first match in object-key iteration order wins; since keys are integer-like strings, that means **lowest trophy ID wins**.
    - Returns `null` if nothing matches → error embed "Could not find a trophy..." (`show.js:21-28`).
 2. Reads the trophy object (`show.js:30`) and picks the image: `object.image || <default Discord CDN trophy PNG>` (`show.js:33`).
@@ -109,22 +112,22 @@ Permissions: none. Cooldown: none. Reply: public embed, possibly with a file att
 - Read `data.${guild}.settings.dedication_display`
 
 ### Edge cases, quirks and bugs
-- **QUIRK — numeric IDs shadow names**: `parseInt("12th Anniversary")` is NaN (safe), but `parseInt("12 Wins")` is 12 — if trophy ID 12 exists, the user gets trophy 12 instead of the trophy named "12 Wins" (`globals.js:122`).
-- **QUIRK — substring matching**: searching "gold" matches "Golden Medal" and any other name containing "gold"; the lowest-ID match is returned with no ambiguity warning.
+- **QUIRK — ID resolution uses the raw input as a key**: `getTrophy`'s ID branch checks `` has(`data.${guild}.trophies.${input}`) `` with the RAW input string as the key (`globals.js:125`) — "12 Wins" is never an existing key, so it correctly falls through to name matching. ID resolution only wins for inputs that are exactly an existing key (pure numeric strings like "12"); the only true shadowing case is a trophy literally NAMED "12" when trophy ID 12 also exists. Note that dotted input like "1.name" resolves through quick.db's dot-path semantics (path traversal into the trophy object) — that one IS real.
+- **QUIRK — substring matching**: searching "gold" matches "Golden Medal" and any other name containing "gold"; the lowest-ID match is returned with no ambiguity warning. Input that normalizes to empty (e.g. "!!!" or pure emoji) matches EVERY trophy — `"".includes(...)` semantics in `checkName` — so `/show` returns the guild's lowest-ID trophy instead of "not found".
 - **BUG — "Always Name" never shows the live username**: in the config 1 branch, `user` is a `GuildMember`, which has no `.username` property in discord.js v14, so `user?.username` is always `undefined` and it always falls back to the dedication name stored at creation time (`globals.js:47`).
-- **BUG risk — missing local image file crashes the command**: if the stored filename no longer exists in `./images/`, `editReply` with the files array throws and the user gets the generic error embed (`show.js:62`). A production incident of this kind is visible in the commented `fixShit()` history (`globals.js:658-683`).
+- **BUG — missing local image file hangs the reply and can crash the process**: `show.js:60-63` calls `interaction.editReply({files})` WITHOUT `return`/`await`, so if the stored filename no longer exists in `./images/` the rejection escapes the dispatcher's try/catch (`events/command.js:51-53`) and the user's deferred reply hangs forever. With no `unhandledRejection` handler anywhere and Node 18's default `--unhandled-rejections=throw`, the rejection can crash the whole process. A production incident of this kind is visible in the commented `fixShit()` history (`globals.js:658-683`).
 - **QUIRK — stored full-URL images (verified in production)**: 195 of 10,853 trophies store a full `https://cdn.discordapp.com/...` URL in `image` instead of a local filename. Discord CDN attachment URLs now expire, so those embeds render broken images. 2,693 store local filenames; 7,965 store `null` (default image used).
 - **QUIRK — dedication object assumed present**: `dedication.name` (`show.js:55`) would throw if a trophy lacked the `dedication` object; verified that all 10,853 production trophies have it, but the importer must not produce rows without it.
 
 ### Discrepancies with prior docs
 - DISCORD_COMMANDS_DOCUMENTATION.md's dedication table says config 1 returns the "username string" — in reality it always returns the stored dedication name (v14 `GuildMember.username` bug).
-- Prior docs describe trophy resolution as "name or ID" but never mention the substring/normalization matching, the lowest-ID tie-break, or the `parseInt` prefix quirk.
+- Prior docs describe trophy resolution as "name or ID" but never mention the substring/normalization matching, the lowest-ID tie-break, the raw-key ID-resolution semantics (including the empty-normalization match-everything case), or the dot-path traversal.
 - Prior docs do not mention that `image` may hold a full CDN URL in real data (they describe only filename-or-null).
 
 ### Rust target
 - Trophies are identified by NAME only (unique per guild) with slash-command autocomplete; drop numeric-ID resolution, substring fuzzing, and the `Trophy ID` footer (internal UUIDv7 IDs are never user-facing).
 - Keep: default trophy image, value field always shown, "Signed by" mention, the three dedication modes — but implement mode 1 correctly (live username via member/user fetch, fallback to stored dedication text).
-- Image serving must not crash on a missing file: fall back to the default image and log.
+- Image serving must not fail on a missing file: gracefully fall back to the default image and log — never leave the reply hanging and never crash the process.
 - Importer note: for the 195 trophies whose `image` is a Discord CDN URL, attempt download at migration time; on failure store NULL (default image) — do not carry expiring URLs into the new schema.
 
 ---

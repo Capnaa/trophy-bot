@@ -36,7 +36,7 @@ Trophy selection everywhere: by **name** (unique per guild, ADR 0005) with slash
 | Admin/permission checks use v13 flag strings → always false or throwing | Serenity typed `Permissions`; checked at registration (`default_member_permissions`) and defensively at runtime |
 | Role rewards dead under d.js v14 **except in guilds where the bot has Administrator** (v14 `has()` short-circuits before the invalid v13 flag resolves) — so live reward behavior exists in part of production; the unawaited async call is also a process-crash vector on hierarchy failures | Working reward engine everywhere with just ManageRoles: on award/revoke/clear, recompute the user's target role set from score + `stack_roles` setting, diff against current roles, apply respecting hierarchy — awaited, idempotent, errors logged, never swallowed |
 | Command counters increment even on error | Count successful executions; errors logged separately with context |
-| Errors silently swallowed (`catch {}` everywhere) | Every error path logs via `log` with guild/user/command context and answers the user with a friendly error embed |
+| Errors silently swallowed (`catch {}` everywhere), while UNCAUGHT async rejections (bare event handlers, un-awaited calls) crash the whole process under Node 18 | Every event/dispatch path is wrapped: errors log via `log` with guild/user/command context and answer the user with a friendly error embed; no code path can take the process down |
 | Stored `trophyValue` desyncs | No stored score — computed `SUM` per ADR 0006 |
 | Whole-blob rewrites for any change | Row-level SQL in transactions |
 
@@ -79,8 +79,8 @@ Trophy selection everywhere: by **name** (unique per guild, ADR 0005) with slash
 | # | Defect | Fix |
 |---|---|---|
 | F21 | `/rewards add` hierarchy check always false (operator precedence) | Correct check: non-owners cannot add roles ≥ their highest role |
-| F22 | Duplicate reward roles allowed (string vs object comparison) | UNIQUE(guild_id, role_id); clear error on duplicates |
-| F23 | Reward limit is 21 (off-by-one), docs said 20 | Exactly 20 enforced |
+| F22 | Duplicate reward roles allowed (string vs object comparison); a duplicated role was then effectively ALWAYS stripped, because `doRewardRoles` applies additions before removals and the role landed in both lists | UNIQUE(guild_id, role_id); clear error on duplicates; reward engine computes one final target set per user (no add-then-remove ordering hazard) |
+| F23 | Reward limit is 21 (off-by-one), docs said 20 | Exactly 20 enforced on new adds; the importer applies no cap (production max is below 20, but legacy guilds could legitimately hold 21) |
 | F24 | Reward for a deleted role cannot be removed (requires cache hit) | Remove by stored role ID; no cache requirement; `/rewards list` marks deleted roles |
 | F25 | `/rewards` command/subcommand description strings are wrong in source | Correct descriptions |
 | F26 | `/settings set` substring matching ("2abc" parses, "mention" first-match) | Discord native choices per setting; no free-text parsing |

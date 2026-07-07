@@ -44,7 +44,7 @@ Users with empty arrays (1,284) produce no rows.
 
 ### Phase 5 — Rewards, panels, settings
 
-- `rewards` → `role_rewards` rows. **Dedupe duplicate role IDs first** (7 guilds repeat a role 2–3 times): keep the entry with the LOWEST requirement — that matches effective legacy behavior, since any satisfied entry granted the role — and report `deduped_rewards`. 287 → ~280 rows expected; `UNIQUE(guild_id, role_id)` then holds.
+- `rewards` → `role_rewards` rows. **Dedupe duplicate role IDs first** (7 guilds repeat a role 2–3 times): keep the entry with the LOWEST requirement, and report `deduped_rewards`. Note this is a deliberate FIX, not legacy parity: legacy `doRewardRoles` applied role additions before removals, so a duplicated role landed in both lists and was effectively ALWAYS stripped (suppression bug, see commands-admin.md) — keeping the lowest requirement is the user-favorable reading of the admin's intent. 287 → ~280 rows expected; `UNIQUE(guild_id, role_id)` then holds.
 - `panel` → `leaderboard_panels` (**461 rows expected**, all `{message, channel}` digits). Many targets will be stale; the post-cutover reconciliation sweep (parity F32) must expect a large initial cleanup, so panel message/channel validity is NOT checked at import.
 - `settings` → `guild_settings`, storing only keys explicitly present (162 guilds non-empty; all values verified in range). Missing keys stay NULL → code-side defaults, exactly like legacy `getSetting`.
 

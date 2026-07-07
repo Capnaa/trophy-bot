@@ -19,7 +19,7 @@ Source of truth: `commands/manage/export.js`, `panel.js`, `perms.js`, `rewards.j
 
 **Current behavior (validated):**
 1. Reads the whole guild blob `data.${guild}` (export.js:14).
-2. If falsy, replies "No data found for this guild to export." (export.js:15-19).
+2. If falsy, replies "No data found for this guild to export." (export.js:15-19) — unreachable dead code in practice: the dispatcher's `getServer()` (events/command.js:21) creates the guild subtree before any command runs, so `data.${guild}` is always truthy by export.js:14. Parity tests should not try to exercise it.
 3. Serializes with `JSON.stringify(filedata, null, 2)` and writes `export-${guild}.json` to the process working directory (export.js:21-28).
 4. Sends the file as an attachment via `editReply` (export.js:37-40), then deletes the local file (export.js:42).
 5. On any error, logs to console and replies "There was an error exporting the data." (export.js:44-48).
@@ -109,7 +109,7 @@ Source of truth: `commands/manage/export.js`, `panel.js`, `perms.js`, `rewards.j
 
 **Edge cases, quirks and bugs:**
 - QUIRK: The full option/choice UI is still exposed to users even though inputs are ignored.
-- QUIRK: The dead code uses camel-less keys (`manageusers`) as choice values but snake_case (`manage_users`) in the DB — a mapping bug frozen in the dead code.
+- QUIRK: The dead code uses camel-less keys (`manageusers`) as choice values but snake_case (`manage_users`) in the DB — a naming inconsistency deliberately bridged by the dead code, not a mapping bug: choice values like `manageusers` are matched via `checkName` (perms.js:89,121,153) and read/write the snake_case DB keys `manage_users` etc. (perms.js:93-116).
 
 **Discrepancies with prior docs:** both docs correctly say it only shows a deprecation notice. CLAUDE.md's command list still shows `/permissions add - Add permissions to a role.` etc. as if functional (marked DEPRECATED in one list, not in the other).
 
@@ -159,9 +159,9 @@ Source of truth: `commands/manage/export.js`, `panel.js`, `perms.js`, `rewards.j
 
 ### /rewards list
 
-**Current behavior (validated):** reads caller's stored score `data.${guild}.users.${author}.trophyValue` (?? 0) (rewards.js:188); builds `**:medal: {requirement}**\n<@&{role}>` lines; paginates 5 per page via `getPage` (rewards.js:201, globals.js:592-600, page clamped to [1, last]); embed titled `{guildName}'s Role Rewards` with "Your score" in the description (rewards.js:203-207). No page indicator in the footer.
+**Current behavior (validated):** reads caller's stored score `data.${guild}.users.${author}.trophyValue` (?? 0) (rewards.js:188); builds `**:medal: {requirement}**\n<@&{role}>` lines; paginates 5 per page via `getPage` (rewards.js:201, globals.js:592-600, page clamped to [1, last]); embed titled `{guildName}'s Role Rewards` with "Your score" in the description (rewards.js:203-207). No page indicator in the footer. The embed field value is built as `'​' + pages.list.join('\n')` (rewards.js:207) — a zero-width space prefix — with each entry carrying its own trailing newline (rewards.js:198), so entries render double-spaced. With ZERO rewards the command still succeeds, rendering a field whose value is just the zero-width space. Rewrite note: Discord rejects empty embed field values (400), so the Rust version needs an explicit empty-state message instead of relying on the `​` trick.
 
-**Role application (context, globals.js:169-235 `doRewardRoles`):** called from `/award`, `/revoke`, `/clear` only — never from `/rewards`. Requires bot MANAGE_ROLES; iterates rewards (sorted desc), grants the highest met reward, and with `stack_roles == 0` grants all met rewards, otherwise removes lower ones; removes rewards no longer met. `stack_roles` is read raw with `config?.stack_roles ?? 1` (globals.js:197), not via `getSetting`.
+**Role application (context, globals.js:169-235 `doRewardRoles`):** called from `/award`, `/revoke`, `/clear` only — never from `/rewards`. Requires bot MANAGE_ROLES; iterates rewards (sorted desc), grants the highest met reward, and with `stack_roles == 0` grants all met rewards, otherwise removes lower ones; removes rewards no longer met. `stack_roles` is read raw with `config?.stack_roles ?? 1` (globals.js:197), not via `getSetting`. Additions are applied BEFORE removals (globals.js:233-234: `member.roles.add(award)` then `member.roles.remove(remove)`), so a role appearing in BOTH lists ends up REMOVED. BUG (suppression): combined with the duplicate-role check bug at rewards.js:96, a duplicated reward role (7 guilds in production) landed in both lists for every score under the default `stack_roles == 1` and was effectively ALWAYS stripped, never held. The Rust reward engine computes one final target role set per user, eliminating the ordering hazard.
 
 **Validation rules & limits (as implemented):**
 - Minimum requirement: 1 (after flooring/clamping to ≥0).
@@ -234,7 +234,7 @@ Source of truth: `commands/manage/export.js`, `panel.js`, `perms.js`, `rewards.j
 - Read: `data.${guild}.settings` (list), Write: `data.${guild}.settings.${setting}` = index (set)
 
 **Edge cases, quirks and bugs:**
-- BUG (latent): the guard uses `&&` instead of `||` (settings.js:68), so an unknown non-empty setting id would pass and crash on `object.default` (settings.js:78). Unreachable through the Discord UI because of choices, but reachable via crafted API calls.
+- BUG (latent): the guard uses `&&` instead of `||` (settings.js:68), so an unknown non-empty setting id would pass. The crash site depends on the input: with `value` OMITTED it crashes on `object.default` at settings.js:78; if a crafted API call supplies an unknown setting WITH a value, the `?? (object.default + 1)` short-circuits and the crash occurs inside `findOption` at settings.js:107 instead. Unreachable through the Discord UI because of choices, but reachable via crafted API calls.
 - QUIRK: name matching is substring-based and first-match-wins — e.g. `value:"mention"` on Leaderboard Format matches option 1 "Mention", but on Dedication Display it matches "Always Mention" (index 0), not "Mention Only in Server".
 - QUIRK: numeric values are 1-based for users while 0-based indexes are stored; `parseInt("2abc")` is accepted as 2.
 - QUIRK: not imsafe-gated even though it is a management command.
