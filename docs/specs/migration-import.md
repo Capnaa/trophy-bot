@@ -29,7 +29,7 @@ One row per valid guild (2,488 expected): snowflake as `i64`, `is_safe` from `im
 1. Iterate the trophies map, skipping the `"current"` key.
 2. Apply defaults for the 43 incomplete trophies (creator → NULL, created → synthetic timestamp, signed → false, details → default text) → report `defaulted_fields`.
 3. **Value normalization:** 44 trophies have non-integer float values (e.g. 8.5). The `value` column is INTEGER: round half-away-from-zero → report `rounded_values` (guild, legacy_id, original, rounded).
-4. **Name deduplication (ADR 0005):** compute each trophy's normalized name (Unicode-aware: lowercase, keep alphanumeric of any script; if empty — emoji-only — fall back to the lowercased raw name). Group by that key; every member of a group with >1 entries is renamed to `"{name} {legacy_id}"`, truncating the base name if the result exceeds 32 chars (21 cases expected), re-disambiguating on residual collision. Expected: **286 groups / 641 renames / 209 guilds** → report `renamed_trophies`.
+4. **Name deduplication (ADR 0005):** compute each trophy's normalized name (Unicode-aware: lowercase, keep alphanumeric of any script; if empty — emoji-only — fall back to the lowercased raw name). Group by that key; every member of a group with >1 entries is renamed to `"{name} {legacy_id}"`, truncating the base name if the result exceeds 32 chars (21 cases expected), re-disambiguating on residual collision. Expected: **287 groups / 643 renames / 209 guilds** (includes one emoji-only pair via the fallback) → report `renamed_trophies`.
 5. Generate a **UUIDv7** per trophy in memory; build the mapping `(guild_id, legacy_id) → uuid`.
 6. Insert with `legacy_id` preserved and `normalized_name` computed; `created` (Unix ms) → timestamp; dedication normalized (empty/null shapes → NULLs; text-only → `dedication_text`; user → `dedication_user_id` + name text); image handled in the Images phase below.
 
@@ -44,7 +44,7 @@ Users with empty arrays (1,284) produce no rows.
 
 ### Phase 5 — Rewards, panels, settings
 
-- `rewards` → `role_rewards` rows. **Dedupe duplicate role IDs first** (7 guilds repeat a role 2–3 times): keep the entry with the LOWEST requirement, and report `deduped_rewards`. Note this is a deliberate FIX, not legacy parity: legacy `doRewardRoles` applied role additions before removals, so a duplicated role landed in both lists and was effectively ALWAYS stripped (suppression bug, see commands-admin.md) — keeping the lowest requirement is the user-favorable reading of the admin's intent. 287 → ~280 rows expected; `UNIQUE(guild_id, role_id)` then holds.
+- `rewards` → `role_rewards` rows. **Dedupe duplicate role IDs first** (7 guilds repeat a role 2–3 times): keep the entry with the LOWEST requirement, and report `deduped_rewards`. Note this is a deliberate FIX, not legacy parity: legacy `doRewardRoles` applied role additions before removals, so a duplicated role landed in both lists and was effectively ALWAYS stripped (suppression bug, see commands-admin.md) — keeping the lowest requirement is the user-favorable reading of the admin's intent. 287 → **275 rows expected** (12 removed); `UNIQUE(guild_id, role_id)` then holds.
 - `panel` → `leaderboard_panels` (**461 rows expected**, all `{message, channel}` digits). Many targets will be stale; the post-cutover reconciliation sweep (parity F32) must expect a large initial cleanup, so panel message/channel validity is NOT checked at import.
 - `settings` → `guild_settings`, storing only keys explicitly present (162 guilds non-empty; all values verified in range). Missing keys stay NULL → code-side defaults, exactly like legacy `getSetting`.
 
@@ -58,8 +58,8 @@ DB stores the filename string; files in `./images/` are used as-is (no renaming 
 
 ### Phase 7 — Validation & report
 
-- **Counts:** valid guilds == 2,488; tombstones == 5; trophies == 10,853; awards == 60,554 with orphans == 0; renames == 641; rounded values == 44; panels == 461; rewards ≈ 280 after dedupe.
-- **Scores:** per user, compare stored `trophyValue` vs recalculated `SUM(value)` — **float-tolerant** comparison (60 users have float stored values). Expected mismatches: **54 users** (drift −990..+3,500) → report `score_mismatches`; NOT reconciled (ADR 0006) — the recalculated value is correct by definition.
+- **Counts:** valid guilds == 2,488; tombstones == 5; trophies == 10,853; awards == 60,554 with orphans == 0; renames == 643; rounded values == 44; panels == 461; rewards == 275 after dedupe (12 removed).
+- **Scores:** per user, compare stored `trophyValue` vs the recalculated `SUM` of the (rounded, as-stored) values — **float-tolerant** comparison (|diff| > 0.001; 60 users have float stored values). Expected mismatches: **133 users total** — 51 genuine legacy drift (range −990..+3,500) plus 82 induced by rounding the 44 float-valued trophies; the report classifies each mismatch as `legacy_drift` or `rounding` (recompute with raw float values to tell them apart) → report `score_mismatches`; NOT reconciled (ADR 0006) — the recalculated value is correct by definition.
 - Report written as JSON + logged summary. Cutover proceeds only after human review of: tombstoned/corrupt guilds, renames, rounded values, missing/expired images, deduped rewards, score mismatches.
 
 ## Staging: local-first validation

@@ -33,6 +33,10 @@ pub async fn cli(cli: Cli) -> anyhow::Result<()> {
         .await
         .expect("Fail to acquire database connection");
 
+    if let Some(MigrateSubcommands::Import { legacy_db }) = &cli.command {
+        return crate::import::run(&db, legacy_db).await;
+    }
+
     let result = match cli.command {
         Some(MigrateSubcommands::Fresh) => Migrator::fresh(&db).await,
         Some(MigrateSubcommands::Refresh) => Migrator::refresh(&db).await,
@@ -40,6 +44,7 @@ pub async fn cli(cli: Cli) -> anyhow::Result<()> {
         Some(MigrateSubcommands::Status) => Migrator::status(&db).await,
         Some(MigrateSubcommands::Up { num }) => Migrator::up(&db, num).await,
         Some(MigrateSubcommands::Down { num }) => Migrator::down(&db, Some(num)).await,
+        Some(MigrateSubcommands::Import { .. }) => unreachable!("handled above"),
         None => Migrator::up(&db, None).await,
     };
 
@@ -70,6 +75,18 @@ pub enum MigrateSubcommands {
     Up {
         #[arg(short, long, help = "Number of pending migrations to apply")]
         num: Option<u32>,
+    },
+    #[command(
+        about = "Import legacy quick.db data into the normalized schema",
+        display_order = 100
+    )]
+    Import {
+        #[arg(
+            long,
+            default_value = "./json.sqlite",
+            help = "Path to the legacy quick.db SQLite file"
+        )]
+        legacy_db: String,
     },
     #[command(about = "Rollback applied migrations", display_order = 80)]
     Down {

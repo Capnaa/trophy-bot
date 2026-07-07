@@ -105,7 +105,7 @@ Users may notice these; everything else must feel identical.
 
 1. **Trophy identification**: name + autocomplete instead of numeric IDs; footers show the name, not "Trophy ID: N" (ADR 0004/0005).
 2. **Renamed legacy duplicates**: 641 colliding trophy names across 209 guilds get their legacy ID suffixed at import (ADR 0005; per-guild report). Normalization is Unicode-aware so non-Latin names are NOT falsely renamed.
-3. **Scores are always exact**: computed from awards; the 54 users whose stored `trophyValue` had drifted will see the corrected number, and the 44 float-valued trophies are rounded to integers (ADR 0006; import report).
+3. **Scores are always exact**: computed from awards; 133 users will see a corrected number — 51 whose stored `trophyValue` had genuinely drifted plus 82 affected by rounding the 44 float-valued trophies to integers (ADR 0006; import report classifies each).
 4. **Role rewards work everywhere** — under d.js v14 they only worked in guilds where the bot had Administrator (dead elsewhere). After cutover the engine works with plain ManageRoles; in previously-dead guilds users will see reward roles appear on their first score change. Existing role state in Administrator guilds is respected: the recompute is idempotent.
 5. **The 150-trophies-per-guild limit is kept at cutover** for parity, but is now a config value, not a technical ceiling (ADR 0002).
 6. **`/imsafe` gate retired**: management commands rely on Discord permissions only.

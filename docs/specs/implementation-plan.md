@@ -24,7 +24,7 @@ Each item lists the F-fixes it must implement (rust-parity-plan.md) and its veri
 
 4. **Typed legacy loader**: serde structs replacing `serde_json::Value` (tolerates `restapi`/`id`/`language`/`tropies`; `-1` tombstones as enum variant).
 5. **Import subcommand**, phases 0-7 of migration-import.md in one transaction + JSON report.
-6. **Full local run** against the real `json.sqlite` copy. Gate: report matches EXACTLY — 2,488 guilds / 5 tombstones / 10,853 trophies / 44 rounded values / 641 renames / 60,554 awards, 0 orphans / ~280 rewards / 461 panels / 54 score mismatches / 200 missing + 195 downloaded-or-expired images. This proves the single-shot migration.
+6. **Full local run** against the real `json.sqlite` copy. Gate: report matches EXACTLY — 2,488 guilds / 5 tombstones / 10,853 trophies / 44 rounded values / 643 renames / 60,554 awards, 0 orphans / 275 rewards after dedupe / 461 panels / 133 score mismatches (51 legacy drift + 82 rounding-induced) / 200 missing + 195 downloaded-or-expired images. This proves the single-shot migration.
 
 ## Phase 3 — Commands (implementation order)
 

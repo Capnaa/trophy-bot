@@ -14,9 +14,9 @@ With internal UUIDs (ADR 0004), users need a human identifier for commands (`/aw
 - Uniqueness is **case- and punctuation-insensitive** via an app-maintained `normalized_name` column with a `UNIQUE(guild_id, normalized_name)` index (a portable solution across SQLite/PostgreSQL; a `lower()` functional index cannot express the full rule).
 - **Normalization is Unicode-aware**: lowercase (Unicode), keep only alphanumeric characters *of any script* (Rust `char::is_alphanumeric`). The legacy `getTrophy` used JS `\W`, which strips ALL non-ASCII — that would have falsely grouped 155 distinct Cyrillic/CJK trophies in 18 guilds (one guild has 62 distinct Chinese-named trophies) as "duplicates". It also means those 187 non-Latin-named trophies were NEVER resolvable by name in the legacy bot (only by numeric ID) — Unicode-aware normalization makes them name-addressable for the first time. Validated legacy behavior still motivates insensitivity: differently-cased names already collided in legacy resolution.
 - **Empty-normalization fallback**: names that normalize to empty (emoji/symbol-only — 17 in production) use the lowercased raw name as their normalized key, so distinct emoji names stay distinct and exact emoji duplicates (2 in production) still collide.
-- Measured with this rule against production: **286 duplicate groups, 641 trophies to rename, in 209 guilds**; 21 renames need base-name truncation to fit 32 chars.
+- Measured with this rule against production: **287 duplicate groups (including one emoji-only pair caught by the fallback), 643 trophies to rename, in 209 guilds**; 21 renames need base-name truncation to fit 32 chars.
 
 ## Consequences
 
 - Ambiguity disappears permanently; `/create` and `/edit` must validate name availability.
-- 641 historical trophies across 209 guilds get renamed at import; guild admins may notice — the import report per guild makes this auditable.
+- 643 historical trophies across 209 guilds get renamed at import; guild admins may notice — the import report per guild makes this auditable.
