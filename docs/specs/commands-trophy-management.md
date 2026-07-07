@@ -27,14 +27,15 @@ This is the resolver used by award, revoke, delete, edit, details (and show). Ex
 2. **Name branch** (`globals.js:131-144`): the input is normalized by `parseName` (`globals.js:237-240`): lowercased, then **all non-`[A-Za-z0-9_]` characters stripped** (spaces, punctuation, emoji, accented letters — note `\W` removes `é`, `ñ`, etc.). It then iterates all trophy entries (skipping the `current` counter key) and returns the **first** trophy whose normalized stored name **contains the normalized input as a substring** (`checkName`, `globals.js:242-244`: `storedName.includes(input)`).
    - Matching is therefore: case-insensitive, punctuation/space-insensitive, **partial substring** (input `gold` matches trophy "Golden Medal").
    - On multiple matches, iteration order of a JS object with integer-like keys applies: **lowest numeric ID wins**.
-   - QUIRK: input that normalizes to the empty string (emoji-only or punctuation-only input, e.g. `🏆`) matches **every** trophy (`"x".includes("") === true`), so the trophy with the lowest ID is returned.
+   - QUIRK (stored-name side): `globals.js:141` requires `checker &&` — a trophy whose **stored name** normalizes to the empty string is **skipped by name matching entirely** and is reachable only by numeric ID. Since `\W` strips ALL non-Latin scripts (Cyrillic, CJK, …), this affects 187 production trophies (~1.7%), including entire Russian-language guilds. Rewrite note: ADR 0005's Unicode-aware normalization makes these trophies name-addressable for the first time.
+   - QUIRK: input that normalizes to the empty string (emoji-only or punctuation-only input, e.g. `🏆`) matches every trophy whose normalized stored name is non-empty (`"x".includes("") === true`), so the **lowest-ID trophy with a non-empty normalized name** is returned.
 3. Returns `null` if nothing matched.
 
 ### doRewardRoles (globals.js:169-235)
 
-Called after award/revoke/clear, always wrapped in an empty `catch` by callers.
+Called after award/revoke/clear. Callers wrap it in `try { doRewardRoles(...) } catch {}` **without `await`** (award.js:71-73, revoke.js:71-73, clear.js:24-26). Since doRewardRoles is `async`, the synchronous `catch` can never catch its rejections — they become **unhandled promise rejections**, and with no `unhandledRejection` handler and Node 18 (node:18-alpine, engines >=18 <19), an unhandled rejection **terminates the process**. This is a crash vector, not error swallowing.
 
-- BUG (high confidence, code-level): `me.permissions.has('MANAGE_ROLES')` (`globals.js:178`) uses the discord.js **v13** flag name. In v14 (`package.json`: `discord.js ^14.6.0`) permission flags are PascalCase (`ManageRoles`); the string `'MANAGE_ROLES'` makes `BitField.resolve` throw, the surrounding try/catch returns (`globals.js:180-182`), and **role rewards are silently never applied — EXCEPT in guilds where the bot has Administrator: v14's `has()` short-circuits on Administrator before resolving the invalid flag string, so role rewards WORK there (see core-behaviors.md)**. (`guild.me` at `globals.js:171` is also undefined in v14, but there is a fetch fallback.)
+- BUG (high confidence, code-level): `me.permissions.has('MANAGE_ROLES')` (`globals.js:178`) uses the discord.js **v13** flag name. In v14 (`package.json`: `discord.js ^14.6.0`) permission flags are PascalCase (`ManageRoles`); the string `'MANAGE_ROLES'` makes `BitField.resolve` throw, the surrounding try/catch returns (`globals.js:180-182`), and **role rewards are silently never applied — EXCEPT in guilds where the bot has Administrator: v14's `has()` short-circuits on Administrator before resolving the invalid flag string, so role rewards WORK there — but they crash the bot on failures: `guild.members.fetch(id)` rejects for non-member targets (`globals.js:231`; /award allows awarding non-members), and `roles.add`/`roles.remove` reject on role-hierarchy failures (`globals.js:233-234`) — all unhandled per the caller pattern above (see core-behaviors.md)**. (`guild.me` at `globals.js:171` is also undefined in v14, but there is a fetch fallback.)
 - The score used is the **stored** `user.trophyValue` (`globals.js:199`), not a recomputed sum — any desync propagates to role decisions.
 - Rewards are stored sorted by requirement descending (sorted at insert time in rewards.js); with `stack_roles = 0` all qualifying roles are awarded, otherwise only the highest, with lower/non-qualifying roles queued for removal.
 
@@ -42,7 +43,7 @@ Called after award/revoke/clear, always wrapped in an empty `catch` by callers.
 
 - `getTrophyCount` (`globals.js:246-250`): `Object.getOwnPropertyNames(trophies).length - 1` (subtracting the `current` key). QUIRK: returns -1 when the guild has no trophies object (defaults to `{}`).
 - `cleanseTrophies` (`globals.js:252-265`): for every user, removes **all** occurrences of a trophy ID (strict `===` matching via `includes`/`indexOf`) and subtracts the trophy's value per occurrence, then rewrites the whole `users` object. Does not call doRewardRoles.
-- `parseUser` (`globals.js:507-544`): resolves mention (`<@id>`), raw snowflake (via `client.users.fetch`), or falls back to `guild.members.search({query, limit: 1})` — a **prefix search** on member names. QUIRK: a plain-text dedication like "Mom" silently resolves to any member whose name starts with "Mom".
+- `parseUser` (`globals.js:507-544`): resolves mention (`<@id>`), raw snowflake (via `client.users.fetch`), or falls back to `guild.members.search({query, limit: 1})` — a **prefix search** on member names. QUIRK: the search branch is **dead in the dedication flow**: create.js:22 and edit.js:23 pass `interaction.guild.id` (a **string**) as the `guild` param, and the branch bails immediately on `if (!guild?.available) return notfound` (`globals.js:527` — `.available` is undefined on a string). Plain-text dedications therefore **never** resolve to members; they always become `{user: null, name: <raw text>}`, and `dedication.user` is only ever set from mention/raw-snowflake input (production confirms: all 243 user-dedications also carry a name; 496 are text-only). The prefix search is live only in `/trophies user`, which passes the actual Guild object.
 - `downloadImage` (`globals.js:500-504`): fetches URL and writes bytes to disk. No content-type or size verification of the downloaded body.
 
 ---
@@ -70,12 +71,12 @@ Discord default permission: Manage Guild (`"32"`, create.js:8). Legacy marker: `
 
 1. Reject if `getTrophyCount >= 150` (create.js:24-37).
 2. Validate, in order: name ≤32 (create.js:52), details ≤300 (create.js:62), description ≤128 (create.js:72), emoji ≤64 (create.js:82), value within ±999999 (create.js:92), dedication ≤32 (create.js:102). Each failure returns an error embed.
-3. Dedication parsing (create.js:119-143): if provided, `parseUser` tries mention/ID/member-prefix-search; on success dedication is `{user: id, name: username}`, otherwise `{user: null, name: <raw text>}`. If no dedication was given, dedication is stored as an **empty object `{}`** (not `{user: null, name: null}`).
+3. Dedication parsing (create.js:119-143): if provided, `parseUser` resolves a mention or raw snowflake to `{user: id, name: username}`; anything else becomes `{user: null, name: <raw text>}` — the member prefix-search never runs here, because create.js:22 passes the guild **ID string** and parseUser's search branch bails on it (see parseUser above). If no dedication was given, dedication is stored as an **empty object `{}`** (not `{user: null, name: null}`).
 4. Increment `trophies.current` and use it as the new ID (create.js:146-147).
 5. Store the full trophy object at `data.${guild}.trophies.${id}` (create.js:151-162). Image filename `${guild}_${id}.${extension}` is stored if an attachment was passed — **before the image is validated**.
 6. Only now validate the image (create.js:164-184): extension (from the attachment *filename*, `split('.').pop()`) must be png/jpg/jpeg/gif; size must be ≤ 1,000,000 bytes (decimal MB). On failure it **returns an error, leaving the already-stored trophy in the DB** with a dangling image filename, the ID counter consumed, and the global counter not incremented.
 7. If valid, `downloadImage` saves to `./images/${guild}_${id}.${extension}` (create.js:186).
-8. Increment global `data.trophies` via get-then-set (create.js:200-201; not atomic).
+8. Increment global `data.trophies` via get-then-set (create.js:200-201; functionally equivalent to quick.db's `add`, which is get-then-set internally too).
 9. Success embed shows emoji/name/description, value, optional "Signed by"/"Dedicated to" fields, footer `Trophy ID: ${id}` (create.js:112-198).
 
 ### Validation rules & limits
@@ -97,7 +98,7 @@ Discord default permission: Manage Guild (`"32"`, create.js:8). Legacy marker: `
 - BUG/QUIRK: value accepts floats despite docs/target schema assuming integers.
 - QUIRK: no duplicate-name check — multiple trophies with identical names allowed (getTrophy will always resolve the lowest ID).
 - QUIRK: empty dedication stored as `{}`, not `{user: null, name: null}` — consumers must handle both shapes.
-- QUIRK: global `data.trophies` counter uses non-atomic read-then-write.
+- QUIRK: global `data.trophies` counter uses explicit get-then-set rather than quick.db's `add` — a style inconsistency only: `add`/`subtract` are get-then-set internally as well, and in a single synchronous process neither pattern is more atomic than the other.
 - QUIRK: image extension comes from the filename, not content-type; no verification of downloaded bytes.
 
 ### Discrepancies with prior docs
@@ -108,7 +109,7 @@ Discord default permission: Manage Guild (`"32"`, create.js:8). Legacy marker: `
 
 ### Rust target
 
-- Keep: field limits (32/128/64/32/300, ±999999), image constraints (png/jpg/jpeg/gif, 1 MB), dedication parsing (mention/ID/text — but drop the accidental member prefix-search or make it explicit).
+- Keep: field limits (32/128/64/32/300, ±999999), image constraints (png/jpg/jpeg/gif, 1 MB), dedication parsing as-is (mention/ID → user dedication, anything else → text dedication; there is no member prefix-search in the dedication flow to drop — that branch is dead here, see parseUser).
 - Change: validate **everything (including image) before** any DB write, inside one transaction. Trophy PK is UUIDv7, never shown to users; **name becomes UNIQUE per guild** — reject duplicates at create (migration renames legacy dupes to `"name legacyId"`). Value becomes an integer column. Drop the 150 cap (or raise via config). Store the image filename string as-is; keep files on disk. Store dedication as nullable `dedication_user_id` + nullable `dedication_text`.
 
 ---
@@ -231,7 +232,7 @@ Discord default permission: Manage Guild (award.js:8). Legacy marker `manage_use
 2. Resolve trophy via `getTrophy`; two identical "could not find" errors for null ID or missing object (award.js:25-45).
 3. Reject if `count < 0 || count > 50` (award.js:47) — the `< 0` branch is unreachable after step 1; effective range is 1–50. Error text says "between 0 and 50".
 4. Push the resolved ID string into the user's `trophies` array `count` times (award.js:57-65). The target user does **not** need to be a guild member.
-5. `add` `object.value * count` to `data.${guild}.users.${user}.trophyValue` and `count` to global `data.trophiesAwarded` (award.js:68-69, atomic quick.db `add`).
+5. `add` `object.value * count` to `data.${guild}.users.${user}.trophyValue` and `count` to global `data.trophiesAwarded` (award.js:68-69, quick.db `add` — itself get-then-set internally, no more atomic than create's explicit pattern).
 6. `doRewardRoles` in an empty try/catch (award.js:71-73) — see shared section: effectively a no-op under discord.js v14 (BUG).
 7. Success embed: "Successfully awarded **N** trophies of ... to @user". Who awarded is **not recorded**.
 
@@ -248,8 +249,9 @@ Discord default permission: Manage Guild (award.js:8). Legacy marker `manage_use
 ### Edge cases, quirks and bugs
 
 - BUG (inherited): the getTrophy path-traversal input (e.g. `1.name`) awards a garbage ID and adds `NaN` to `trophyValue`, poisoning the score permanently.
-- BUG (inherited): role rewards never actually applied (doRewardRoles v14 flag bug), and any error is swallowed.
+- BUG (inherited): role rewards never actually applied (doRewardRoles v14 flag bug) — except in Administrator guilds, where rewards DO run and any rejection (non-member fetch — reachable here since /award allows non-member targets — or role-hierarchy failure) is an **unhandled promise rejection that crashes the process** (the un-awaited try/catch at award.js:71-73 cannot catch it; see shared section).
 - QUIRK: count 0 or negative → silently coerced to 1 (not an error as docs claim); the range error message ("between 0 and 50") is unreachable for the low bound.
+- QUIRK: awarding to a user with no record **creates** it (award.js:67-68 defaults the missing array and writes it back) — like /clear, award is a user-record-creation path.
 - QUIRK: dead `if (!interaction) return;` guards (award.js:30,41,51,79).
 - QUIRK: `awarded_by` is untracked — the legacy data has no record of who awarded.
 
@@ -294,7 +296,7 @@ Same options as /award: `trophy` (String, required), `user` (User, required), `c
 ### Edge cases, quirks and bugs
 
 - **BUG (confirmed, revoke.js:64): `trophies.pop(id)`** — `Array.prototype.pop` takes no arguments; the `id` is ignored and the **last element of the array is removed, whatever trophy it is**. Meanwhile the score subtraction uses the *requested* trophy's value. Net effect: revoking trophy A can delete the user's copies of trophy B while subtracting A's value — desyncing `trophies[]` from `trophyValue` and from reality. Only coincidentally correct when the last array entries happen to be the requested trophy (e.g. right after an award).
-- QUIRK: if the user holds 0 copies, `min(count, 0) = 0` → nothing changes, but `all` is true, so the bot replies "Successfully removed **all** trophies ..." — a success message for a no-op.
+- QUIRK: if the user holds 0 copies, `min(count, 0) = 0` → no trophies are removed, but `all` is true, so the bot replies "Successfully removed **all** trophies ..." — a success message for a no-op. The no-op still **writes**: revoke.js:68-69 write back the (defaulted-empty) array and subtract 0, so revoking from a user who never held anything creates a `{trophies: [], trophyValue: 0}` record — one source of the 1,284 empty user records the importer will encounter.
 - QUIRK: strict `===` in the occurrence filter — numeric-vs-string ID mismatches in legacy arrays make `amount` 0 (silent "removed all" no-op).
 - QUIRK: same unreachable `< 0` branch and "between 0 and 50" message as award.
 
