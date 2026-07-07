@@ -61,6 +61,10 @@ Every slash command of the production bot, what it REALLY does (validated agains
 - **Admin detection always false** (v13 `'ADMINISTRATOR'` string compared under v14).
 - Command counters increment even when the command errors; new guilds seeded with `imsafe: true`; button pagination described in old docs does not exist.
 
+## Fixing it all in Rust
+
+The consolidated remediation plan — command parity table, every defect above mapped to its fix (F1–F35), the intentional ADR-backed behavior deltas, and the cutover acceptance criteria — lives in [rust-parity-plan.md](rust-parity-plan.md). That is the master checklist for implementation.
+
 ## Data handling
 
 How data is stored, manipulated and migrated:

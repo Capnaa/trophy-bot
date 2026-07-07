@@ -1,6 +1,6 @@
 # ADR 0008: Legacy data import as a dedicated CLI subcommand
 
-**Status:** Proposed (2026-07-07)
+**Status:** Accepted (2026-07-07)
 
 ## Context
 

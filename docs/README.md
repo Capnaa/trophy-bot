@@ -18,6 +18,7 @@ Documentation for the Rust rewrite of Trophy Bot. All content here is validated 
 | [specs/core-behaviors.md](specs/core-behaviors.md) | globals.js shared functions, events, dispatch/permission flow, background tasks |
 | [specs/data-model-legacy.md](specs/data-model-legacy.md) | quick.db JSON structures, verified production statistics, data anomalies |
 | [specs/migration-import.md](specs/migration-import.md) | Legacy → normalized DB import algorithm, validation report, cutover runbook |
+| [specs/rust-parity-plan.md](specs/rust-parity-plan.md) | Master remediation plan: command parity table, every defect → its fix (F1–F35), intentional deltas, acceptance criteria |
 
 ## Conventions
 
