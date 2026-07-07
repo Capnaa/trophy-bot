@@ -57,7 +57,7 @@ Trophy selection everywhere: by **name** (unique per guild, ADR 0005) with slash
 | F9 | `/award` never records who awarded | `user_trophies.awarded_by` recorded (NULL only for imported legacy rows) |
 | F10 | `/delete` never recomputes role rewards and unlinks `./images/null` when imageless | FK cascade removes awards; reward recompute triggered for affected users; image unlink only when an image exists, errors logged |
 | F11 | `/details` public + bypasses permission gate | Ephemeral reply; Manage Guild permission enforced like its siblings |
-| F12 | `getTrophy` path traversal (`1.name` "resolves" and `/award` then adds NaN to the score), substring matching, emoji-only input matches everything | Exact normalized-name resolution + autocomplete; parameterized queries make traversal impossible |
+| F12 | `getTrophy` path traversal (`1.name` "resolves"; `/award` then persists the bogus ID into the user's array before quick.db's `add` throws on NaN and aborts the command), substring matching, emoji-only input matches everything | Exact normalized-name resolution + autocomplete; parameterized queries make traversal impossible |
 | F37 | `/edit` change report cosmetics: editing a dedication to the same value counts as a change; removing with `-` prints "> null" | Accurate change report (cosmetic; fixed as part of the `/edit` response formatting) |
 
 ### 3.2 User-facing
