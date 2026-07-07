@@ -93,9 +93,32 @@ impl Bot {
         });
 
         log::info!("Starting bot");
-        client
-            .start_shard_range(shard_start..shard_end, shard_total)
-            .await
-            .map_err(|e| e.into())
+        let shard_manager = client.shard_manager.clone();
+        let runner = tokio::task::spawn(async move {
+            client
+                .start_shard_range(shard_start..shard_end, shard_total)
+                .await
+        });
+
+        shutdown_signal().await?;
+        log::info!("Shutdown signal received, stopping shards");
+        shard_manager.shutdown_all().await;
+        runner.await?.map_err(|e| e.into())
     }
+}
+
+/// Waits for Ctrl+C (SIGINT) or, on Unix, SIGTERM (sent by `docker stop`).
+async fn shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result?,
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await?;
+    Ok(())
 }
