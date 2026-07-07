@@ -21,6 +21,7 @@ Documentation for the Rust rewrite of Trophy Bot. All content here is validated 
 | [specs/rust-parity-plan.md](specs/rust-parity-plan.md) | Master remediation plan: command parity table, every defect → its fix (F1–F37), intentional deltas, acceptance criteria |
 | [specs/schema.md](specs/schema.md) | Definitive column-level database schema: tables, types, nullability, indexes, portability notes |
 | [specs/i18n.md](specs/i18n.md) | Localization: Fluent catalogs, locale resolution from the interaction, rules for command code |
+| [specs/implementation-plan.md](specs/implementation-plan.md) | Ordered code-migration plan: phases, command implementation order C0–C17 with their F-fixes, local validation gates |
 
 ## Conventions
 

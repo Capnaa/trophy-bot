@@ -64,7 +64,7 @@ DB stores the filename string; files in `./images/` are used as-is (no renaming 
 
 ## Staging: local-first validation
 
-Current focus is (a) migrating the code and (b) leaving the data import ready and PROVEN. All import development and validation happens **locally against a copy of `json.sqlite`, targeting SQLite**, until the importer completes a full single-shot run whose report matches every expected count above. PostgreSQL parity validation (same import, local Postgres via Docker) comes after that, and the cutover below only once command parity (rust-parity-plan.md) is complete. Nothing in this phase touches production.
+Current focus is (a) migrating the code and (b) leaving the data import ready and PROVEN. All import development and validation happens **locally against a copy of `json.sqlite`, targeting SQLite**, until the importer completes a full single-shot run whose report matches every expected count above. PostgreSQL portability is entrusted to SeaORM's engine-agnostic schema/query API (ADR 0003) and is deliberately NOT validated now — a Postgres validation run happens only pre-cutover, once command parity (rust-parity-plan.md) is complete. Nothing in this phase touches production. Ordered implementation steps: `docs/specs/implementation-plan.md`.
 
 ```bash
 cp json.sqlite test_import_source.sqlite   # read-only input copy
