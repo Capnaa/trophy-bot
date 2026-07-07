@@ -15,7 +15,12 @@ pub async fn bench(
     //tokio::task::yield_now().await;
     let time = start.elapsed().as_secs_f32();
 
-    let response = format!("latency: {latency}ms\ntime: {time}s");
+    let locale = crate::i18n::resolve(ctx.locale());
+    let response = crate::i18n::t_args(
+        &locale,
+        "bench-response",
+        &[("latency", latency.into()), ("time", time.into())],
+    );
     ctx.say(response).await?;
     log::warn!("Command `bench` dispatched in {}s", start.elapsed().as_secs_f32());
     Ok(())

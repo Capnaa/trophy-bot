@@ -1,5 +1,6 @@
 mod cli;
 mod bot;
+mod i18n;
 mod legacy;
 mod migrations;
 

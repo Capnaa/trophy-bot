@@ -24,6 +24,7 @@ The legacy JS (`commands/`, `events/`, `globals.js`, `index.js`) remains the ref
 
 - Always run `cargo test` after changing code.
 - Use the `log` crate; never `println!`/`eprintln!` in bot code.
+- Every user-facing string goes through the i18n layer (`src/i18n.rs`, catalogs in `locales/`) — never `format!` user-facing text directly. See `docs/specs/i18n.md`.
 - Keep `main` minimal; structure code in modules and functions.
 - Schema changes only through SeaORM migrations in `src/migrations/` using the schema API (portable across SQLite and PostgreSQL — no raw SQL).
 
