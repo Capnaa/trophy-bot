@@ -112,6 +112,53 @@ fn dedication_tolerates_all_four_legacy_shapes() {
 }
 
 #[test]
+fn guilds_dump_float_imsafe_and_image_shape_counts_match_spec() {
+    let guilds = load_guilds_dump();
+    let valid: Vec<&LegacyGuild> = guilds.values().filter_map(GuildEntry::as_guild).collect();
+
+    let float_trophies = valid
+        .iter()
+        .flat_map(|g| g.trophy_defs())
+        .filter(|(_, t)| t.value.fract() != 0.0)
+        .count();
+    assert_eq!(float_trophies, 44, "trophies with non-integer float values");
+
+    let guilds_with_float_trophies = valid
+        .iter()
+        .filter(|g| g.trophy_defs().any(|(_, t)| t.value.fract() != 0.0))
+        .count();
+    assert_eq!(guilds_with_float_trophies, 19, "guilds owning float-valued trophies");
+
+    let float_users = valid
+        .iter()
+        .flat_map(|g| g.users.values())
+        .filter(|u| u.trophy_value.fract() != 0.0)
+        .count();
+    assert_eq!(float_users, 60, "users with float trophyValue");
+
+    let imsafe_present = valid.iter().filter(|g| g.imsafe.is_some()).count();
+    assert_eq!(imsafe_present, 2_407, "guilds with an imsafe key");
+    assert!(
+        valid.iter().all(|g| g.imsafe != Some(false)),
+        "imsafe is always true when present"
+    );
+
+    let (mut null, mut local, mut cdn) = (0usize, 0usize, 0usize);
+    for (_, trophy) in valid.iter().flat_map(|g| g.trophy_defs()) {
+        match trophy.image.as_deref() {
+            None => null += 1,
+            Some(image) if image.starts_with("https://cdn.discordapp.com/") => cdn += 1,
+            Some(_) => local += 1,
+        }
+    }
+    assert_eq!(
+        (null, local, cdn),
+        (7_965, 2_693, 195),
+        "image shapes (null / local filename / CDN URL)"
+    );
+}
+
+#[test]
 fn guild_entry_tolerates_unknown_keys_and_rejects_unknown_integers() {
     let json = r#"{
         "id": "1", "language": "en", "restapi": {"token": "", "enabled": false},
@@ -127,8 +174,47 @@ fn guild_entry_tolerates_unknown_keys_and_rejects_unknown_integers() {
 
     let tombstone: GuildEntry = serde_json::from_str("-1").expect("tombstone");
     assert!(tombstone.is_tombstone());
+}
 
-    assert!(serde_json::from_str::<GuildEntry>("7").is_err(), "only -1 is a tombstone");
+#[test]
+fn guild_entry_classifies_non_object_non_tombstone_values_as_corrupt() {
+    // migration-import.md Phase 0: only the literal integer -1 is a tombstone;
+    // any other non-object guild value must surface as corrupt (0 expected in
+    // production) instead of hard-failing the whole document parse.
+    for json in ["7", "-1.0", "2.5", "\"broken\"", "true", "null", "[]"] {
+        let entry: GuildEntry = serde_json::from_str(json).expect(json);
+        assert!(entry.is_corrupt(), "{json} should be corrupt");
+        assert!(!entry.is_tombstone(), "{json} is not a tombstone");
+        assert!(entry.as_guild().is_none(), "{json} is not a guild");
+    }
+}
+
+#[test]
+fn trophy_parse_errors_name_the_trophy_id_and_real_cause() {
+    // A trophy missing its required `name` field must not be swallowed into an
+    // opaque "did not match any variant" error.
+    let json = r#"{"trophies": {"current": 2, "1": {"value": 10}}}"#;
+    let err = serde_json::from_str::<LegacyGuild>(json).expect_err("missing name").to_string();
+    assert!(err.contains("trophy `1`"), "error should name the trophy id: {err}");
+    assert!(err.contains("name"), "error should carry the inner serde cause: {err}");
+}
+
+#[test]
+fn guild_parse_errors_name_the_guild_key() {
+    let json = r#"{"111": -1, "222": {"trophies": {"9": {"value": 1}}}}"#;
+    let err = parse_guilds(json).expect_err("guild 222 has a broken trophy");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("guild `222`"), "error should name the guild key: {msg}");
+    assert!(msg.contains("trophy `9`"), "error should name the trophy id: {msg}");
+}
+
+#[test]
+fn legacy_url_enforces_read_only_mode() {
+    assert_eq!(legacy_url("./json.sqlite"), "sqlite://./json.sqlite?mode=ro");
+    assert_eq!(legacy_url("sqlite://db.sqlite"), "sqlite://db.sqlite?mode=ro");
+    assert_eq!(legacy_url("sqlite://db.sqlite?foo=1"), "sqlite://db.sqlite?foo=1&mode=ro");
+    // An explicit caller-provided mode is respected.
+    assert_eq!(legacy_url("sqlite://db.sqlite?mode=rwc"), "sqlite://db.sqlite?mode=rwc");
 }
 
 #[tokio::test]
@@ -140,6 +226,7 @@ async fn loads_from_sqlite_with_matching_counts() {
 
     assert_eq!(data.guilds.len(), 2_493, "root guild keys");
     assert_eq!(data.tombstone_count(), 5);
+    assert_eq!(data.corrupt_count(), 0, "corrupt guild entries (0 expected in production)");
     assert_eq!(data.guilds().count(), 2_488, "valid guilds");
 
     let trophies: usize = data.guilds().map(|(_, g)| g.trophy_defs().count()).sum();

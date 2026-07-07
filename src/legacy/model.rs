@@ -23,12 +23,16 @@ pub struct LegacyBot {
     pub trophies_awarded: u64,
 }
 
-/// One root entry of the `guilds` document: either a real guild object or a
-/// `/forgetme` tombstone (the literal JSON integer `-1`).
+/// One root entry of the `guilds` document: a real guild object, a
+/// `/forgetme` tombstone (the literal JSON integer `-1`), or any other
+/// non-object value, which migration-import.md Phase 0 requires the importer
+/// to skip and report as corrupt (0 expected in production).
 #[derive(Debug, Clone)]
 pub enum GuildEntry {
     Tombstone,
     Guild(Box<LegacyGuild>),
+    /// Non-object, non-tombstone value, kept verbatim for the import report.
+    Corrupt(serde_json::Value),
 }
 
 impl GuildEntry {
@@ -36,10 +40,14 @@ impl GuildEntry {
         matches!(self, Self::Tombstone)
     }
 
+    pub fn is_corrupt(&self) -> bool {
+        matches!(self, Self::Corrupt(_))
+    }
+
     pub fn as_guild(&self) -> Option<&LegacyGuild> {
         match self {
             Self::Guild(guild) => Some(guild),
-            Self::Tombstone => None,
+            Self::Tombstone | Self::Corrupt(_) => None,
         }
     }
 }
@@ -47,15 +55,15 @@ impl GuildEntry {
 impl<'de> Deserialize<'de> for GuildEntry {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        match value.as_i64() {
-            Some(-1) => Ok(Self::Tombstone),
-            Some(other) => Err(serde::de::Error::custom(format!(
-                "unexpected integer guild entry {other} (only -1 tombstones are known)"
-            ))),
-            None => serde_json::from_value(value)
+        if value.is_object() {
+            return serde_json::from_value(value)
                 .map(|guild| Self::Guild(Box::new(guild)))
-                .map_err(serde::de::Error::custom),
+                .map_err(serde::de::Error::custom);
         }
+        if value.as_i64() == Some(-1) {
+            return Ok(Self::Tombstone);
+        }
+        Ok(Self::Corrupt(value))
     }
 }
 
@@ -68,7 +76,7 @@ pub struct LegacyGuild {
     #[serde(default)]
     pub settings: HashMap<String, i64>,
     /// Trophy-id → definition, plus the special `"current"` counter key.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "trophy_map")]
     pub trophies: HashMap<String, TrophyEntry>,
     /// User snowflake → award record.
     #[serde(default)]
@@ -98,11 +106,41 @@ impl LegacyGuild {
 
 /// Value of the guild `trophies` map: every key is a trophy definition except
 /// `"current"`, which holds the next-id counter as a bare integer.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum TrophyEntry {
     Counter(i64),
     Trophy(Box<LegacyTrophy>),
+}
+
+// Hand-rolled instead of `#[serde(untagged)]` so a malformed trophy surfaces
+// its real serde cause (e.g. "missing field `name`") rather than the opaque
+// "data did not match any variant" — vital when locating one bad trophy among
+// the ~10,853 in the multi-megabyte production guilds document.
+impl<'de> Deserialize<'de> for TrophyEntry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(counter) = value.as_i64() {
+            return Ok(Self::Counter(counter));
+        }
+        serde_json::from_value(value)
+            .map(|trophy| Self::Trophy(Box::new(trophy)))
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Deserializes the guild `trophies` map entry-by-entry so a parse failure
+/// names the offending trophy id.
+fn trophy_map<'de, D>(deserializer: D) -> Result<HashMap<String, TrophyEntry>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = HashMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|(id, value)| match serde_json::from_value(value) {
+            Ok(entry) => Ok((id, entry)),
+            Err(err) => Err(serde::de::Error::custom(format!("trophy `{id}`: {err}"))),
+        })
+        .collect()
 }
 
 /// A trophy definition. 43 pre-rewrite trophies miss `creator`/`created`/

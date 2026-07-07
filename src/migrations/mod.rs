@@ -3,7 +3,10 @@ use sea_orm::{ConnectOptions, Database};
 use sea_orm_migration::prelude::*;
 use crate::cli::Cli;
 
-mod m20251115_000001_create_basic_tables;
+mod m20260708_000001_initial_schema;
+
+#[cfg(test)]
+mod tests;
 
 pub struct Migrator;
 
@@ -11,7 +14,7 @@ pub struct Migrator;
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         vec![
-            Box::new(m20251115_000001_create_basic_tables::Migration)
+            Box::new(m20260708_000001_initial_schema::Migration)
         ]
     }
 }

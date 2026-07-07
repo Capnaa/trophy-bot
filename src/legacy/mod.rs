@@ -11,7 +11,7 @@ mod tests;
 pub use model::*;
 
 use anyhow::{Context, Result};
-use sea_orm::sea_query::Query;
+use sea_orm::sea_query::{Expr, ExprTrait, Query};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use std::collections::HashMap;
 
@@ -30,11 +30,7 @@ impl LegacyData {
     /// Loads and parses both documents from the quick.db SQLite file at `path`
     /// (a filesystem path, e.g. `./json.sqlite`).
     pub async fn load(path: &str) -> Result<Self> {
-        let url = if path.starts_with("sqlite:") {
-            path.to_owned()
-        } else {
-            format!("sqlite://{path}")
-        };
+        let url = legacy_url(path);
         let db = Database::connect(&url)
             .await
             .with_context(|| format!("connecting to legacy quick.db at {url}"))?;
@@ -47,13 +43,13 @@ impl LegacyData {
 
         let bot: LegacyBot =
             serde_json::from_str(&bot_json).context("parsing legacy `bot` document")?;
-        let guilds: HashMap<String, GuildEntry> =
-            serde_json::from_str(&guilds_json).context("parsing legacy `guilds` document")?;
+        let guilds = parse_guilds(&guilds_json)?;
 
         log::info!(
-            "loaded legacy data: {} root guild keys ({} tombstones)",
+            "loaded legacy data: {} root guild keys ({} tombstones, {} corrupt)",
             guilds.len(),
             guilds.values().filter(|entry| entry.is_tombstone()).count(),
+            guilds.values().filter(|entry| entry.is_corrupt()).count(),
         );
         Ok(Self { bot, guilds })
     }
@@ -75,6 +71,12 @@ impl LegacyData {
         self.guilds.values().filter(|entry| entry.is_tombstone()).count()
     }
 
+    /// Number of corrupt (non-object, non-tombstone) root guild entries.
+    /// Reported by migration-import.md Phase 0; production has 0.
+    pub fn corrupt_count(&self) -> usize {
+        self.guilds.values().filter(|entry| entry.is_corrupt()).count()
+    }
+
     /// Historical global counters for the `bot_stats` table: every per-command
     /// counter plus `trophiesAwarded` and `rootTrophies` (ADR 0006 keeps them
     /// as a record only; they are known-unreliable).
@@ -86,10 +88,40 @@ impl LegacyData {
     }
 }
 
-/// Reads the single-row `json` column of a quick.db table.
+/// Builds the SQLite connection URL for the legacy quick.db file, enforcing
+/// `mode=ro`: `json.sqlite` is strictly read-only input (migration-import.md
+/// principle 1). A caller-supplied explicit `mode=` is respected.
+fn legacy_url(path: &str) -> String {
+    let mut url = if path.starts_with("sqlite:") {
+        path.to_owned()
+    } else {
+        format!("sqlite://{path}")
+    };
+    if !url.contains("mode=") {
+        url.push(if url.contains('?') { '&' } else { '?' });
+        url.push_str("mode=ro");
+    }
+    url
+}
+
+/// Parses the root `guilds` document one guild at a time so a failure names
+/// the offending guild key instead of drowning in the multi-megabyte blob.
+fn parse_guilds(json: &str) -> Result<HashMap<String, GuildEntry>> {
+    let raw: HashMap<String, serde_json::Value> =
+        serde_json::from_str(json).context("parsing legacy `guilds` document")?;
+    raw.into_iter()
+        .map(|(id, value)| {
+            let entry: GuildEntry = serde_json::from_value(value)
+                .with_context(|| format!("parsing legacy guild `{id}`"))?;
+            Ok((id, entry))
+        })
+        .collect()
+}
+
+/// Reads the `json` column of a quick.db table's single `ID = 'data'` row.
 async fn fetch_json(db: &DatabaseConnection, table: &'static str) -> Result<String> {
     let mut query = Query::select();
-    query.from(table).column("json").limit(1);
+    query.from(table).column("json").and_where(Expr::col("ID").eq("data")).limit(1);
 
     db.query_one(&query)
         .await
