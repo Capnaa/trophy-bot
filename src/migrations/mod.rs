@@ -19,14 +19,31 @@ impl MigratorTrait for Migrator {
 pub async fn cli(cli: Cli) -> anyhow::Result<()> {
     let url = cli.database_url;
 
+    // Migration progress logs at info level; without this a plain
+    // `trophy-bot status` would print nothing (cli sets Warn when not in debug).
+    if !cli.debug {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+
     let connect_options = ConnectOptions::new(url)
+        .sqlx_logging(cli.debug)
         .to_owned();
 
     let db = Database::connect(connect_options)
         .await
         .expect("Fail to acquire database connection");
 
-    if let Err(err) = cli::run_migrate(Migrator, &db, cli.command.map(sea_orm_cli::MigrateSubcommands::from), cli.debug).await {
+    let result = match cli.command {
+        Some(MigrateSubcommands::Fresh) => Migrator::fresh(&db).await,
+        Some(MigrateSubcommands::Refresh) => Migrator::refresh(&db).await,
+        Some(MigrateSubcommands::Reset) => Migrator::reset(&db).await,
+        Some(MigrateSubcommands::Status) => Migrator::status(&db).await,
+        Some(MigrateSubcommands::Up { num }) => Migrator::up(&db, num).await,
+        Some(MigrateSubcommands::Down { num }) => Migrator::down(&db, Some(num)).await,
+        None => Migrator::up(&db, None).await,
+    };
+
+    if let Err(err) = result {
         log::error!("{}", err);
     }
 
@@ -65,17 +82,4 @@ pub enum MigrateSubcommands {
         )]
         num: u32,
     },
-}
-
-impl From<MigrateSubcommands> for sea_orm_cli::MigrateSubcommands {
-    fn from(cmd: MigrateSubcommands) -> Self {
-        match cmd {
-            MigrateSubcommands::Fresh => sea_orm_cli::MigrateSubcommands::Fresh,
-            MigrateSubcommands::Refresh => sea_orm_cli::MigrateSubcommands::Refresh,
-            MigrateSubcommands::Reset => sea_orm_cli::MigrateSubcommands::Reset,
-            MigrateSubcommands::Status => sea_orm_cli::MigrateSubcommands::Status,
-            MigrateSubcommands::Up { num } => sea_orm_cli::MigrateSubcommands::Up { num },
-            MigrateSubcommands::Down { num } => sea_orm_cli::MigrateSubcommands::Down { num },
-        }
-    }
 }

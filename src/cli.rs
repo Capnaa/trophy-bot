@@ -1,5 +1,5 @@
 use clap::Parser;
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use serenity::all::{GatewayIntents, Http};
 use serenity::Client;
 use serenity::client::ClientBuilder;

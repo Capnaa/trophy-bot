@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 # CLI and core
 clap = { version = "4.5.47", features = ["derive", "env"] }
-dotenv = "0.15.0"
+dotenvy = "0.15.7"
 env_logger = "0.11.8"
 log = "0.4.28"
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "signal"] }
@@ -20,7 +20,6 @@ sea-orm-migration = { version = "2.0.0-rc", features = ["sqlx-sqlite", "sqlx-pos
 # Discord API
 serenity = { version = "0.12", features = ["client", "gateway", "rustls_backend"] }
 poise = "0.6"
-sea-orm-cli = "2.0.0-rc.18"
 
 # Features for future expansion
 [features]
@@ -31,7 +30,6 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"
 overflow-checks = true
 debug = false
 incremental = false
