@@ -83,9 +83,15 @@ commands**. Uses `@discordjs/rest` with API v9 routes.
 8. `await command.run(interaction)` inside try/catch. On error:
    - `console.error`, then if `client.errorChannel !== null` (command.js:57), sends an
      embed there with the command string, "perpetrator" user ID, guild ID, and the first
-     900 chars of the stacktrace (command.js:57-76). If *that* send fails, posts
-     "Error log could not be sent, dev should know about this..." to the invocation
-     channel (command.js:72-75). **The guard is `!== null`, but ready.js leaves
+     900 chars of the stacktrace (command.js:57-76). The `client.errorChannel.send({...})`
+     at command.js:68 is **un-awaited**, so an *asynchronous* send failure (missing perms
+     in the error channel, network) is NOT caught by the inner catch at command.js:72 —
+     it becomes another unhandled promise rejection (crash, see Bug #1). The fallback
+     "Error log could not be sent, dev should know about this..." posted to the invocation
+     channel (command.js:74) fires only on *synchronous* throws: the undefined-
+     `errorChannel` case, or a non-Error throw making `error.stack.slice` at command.js:60
+     blow up — and that fallback `interaction.channel.send` is likewise un-awaited.
+     **The guard is `!== null`, but ready.js leaves
      `client.errorChannel` undefined when its fetch throws — undefined passes the
      check.** Net effect: when the error channel is unreachable (e.g. running the
      legacy bot locally during migration testing), every command error publicly posts
@@ -159,7 +165,8 @@ Resolution order:
 3. No match → `null`.
 
 Edge case: a query that normalizes to the empty string (e.g. `"!!!"` or an emoji) matches
-the **first** trophy, since `"anything".includes("") === true`.
+the **first** trophy WITH a non-empty normalized name, since `"anything".includes("") === true`
+(the `checker &&` guard at `globals.js:141` skips stored names that themselves normalize to empty).
 
 ### getSetting(client, guild, setting) → number|null (:95-103) and settings (:52-88)
 
@@ -372,7 +379,13 @@ Deletes each trophy's image file from `./images/`, sets `data.${guild.id} = -1`
    interaction), command.js:21 → getServer's unconditional `guild.fetch()`
    (globals.js:407), command.js:29 `interaction.member.fetch()`, and command.js:37's
    dead-code `client.channels.fetch()` all run BEFORE the try/catch that wraps only
-   `command.run`; events/user.js:16 `member.roles.add()` is not awaited, so its
+   `command.run`; command.js:24 `AttemptToFetchUsers(client)` is fired un-awaited with no
+   `.catch` — internally it does `await guild.members.fetch()` for EVERY guild
+   (globals.js:491-493), and member fetches reject in practice (GuildMembersTimeout on
+   large guilds, gateway hiccups), so once per day-of-month change a single command
+   dispatch triggers a fleet-wide fetch whose rejection escapes as an unhandled promise
+   rejection — arguably the largest per-dispatch crash vector; events/user.js:16
+   `member.roles.add()` is not awaited, so its
    surrounding try/catch never sees the rejection; events/join.js:11
    `await guild.members.fetch()` has no catch at all. (Note the dead-code `isAdmin`
    computation still costs a live channel fetch on every command dispatch.) Rust
