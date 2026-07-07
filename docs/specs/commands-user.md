@@ -5,6 +5,7 @@ Files audited in full: `commands/users/leaderboard.js`, `commands/users/show.js`
 `commands/users/trophies.js`, `commands/users/trophystats.js`, plus the shared helpers in
 `globals.js` and the dispatcher `events/command.js`. Production data shapes were verified
 against `guilds_db.json` (2,493 guilds / 10,853 trophies / 60,554 award entries).
+The superseded documents referenced in the discrepancy sections live in `docs/archive/`.
 
 **Shared dispatcher behavior (applies to all commands below):**
 - Every command is publicly deferred with `interaction.deferReply()` (`events/command.js:14`) — no user command here is ephemeral.

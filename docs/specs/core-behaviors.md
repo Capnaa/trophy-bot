@@ -5,6 +5,7 @@ Source of truth: the JavaScript code at `globals.js`, `index.js` and `events/*.j
 The prior markdown docs (CLAUDE.md, DISCORD_COMMANDS_DOCUMENTATION.md,
 COMMANDS_AND_FUNCTIONALITY.md) were AI-generated and contain errors; where they
 disagree with the code, this document wins. `TrophyBot-Copy/` is a backup and was ignored.
+The superseded documents referenced in the discrepancy sections live in `docs/archive/`.
 
 ## Client & startup
 
@@ -169,8 +170,10 @@ Intended algorithm (rewards are stored **sorted descending by requirement** by
 1. Uses `guild.me` (v13 API; `undefined` in v14) with a fetch fallback, then checks
    `me.permissions.has('MANAGE_ROLES')` inside try/catch. **In discord.js v14 the flag
    name is `ManageRoles`; `'MANAGE_ROLES'` throws `BitFieldInvalid`, the catch returns,
-   and the whole function is a silent no-op.** Role rewards are dead in production under
-   v14 (see Bugs).
+   and the whole function is a silent no-op — EXCEPT in guilds where the bot has
+   Administrator, since v14's `has()` short-circuits on Administrator before resolving
+   the flag string and the function then runs fully.** Role rewards are dead in
+   production under v14 in all other guilds (see Bugs).
 2. Were the check passing: walk rewards high→low against `user.trophyValue`:
    - While `score < requirement`: remember the role; each subsequent iteration pushes the
      previously remembered (unearned) role into `remove` — so all roles above the earned
@@ -332,10 +335,20 @@ Deletes each trophy's image file from `./images/`, sets `data.${guild.id} = -1`
 
 ## Bugs & quirks found
 
-1. **BUG — role rewards are dead under discord.js v14.** `doRewardRoles` checks
-   `me.permissions.has('MANAGE_ROLES')` (v13 flag name); v14 throws `BitFieldInvalid`,
-   the try/catch returns, so no role is ever awarded/removed (globals.js:177-182). Also
-   uses removed `guild.me` (fallback fetch masks it).
+1. **BUG — role rewards are dead in most guilds under discord.js v14.**
+   `doRewardRoles` checks `me.permissions.has('MANAGE_ROLES')` (v13 flag name);
+   `has()` throws `BitFieldInvalid` and the catch silently returns
+   (globals.js:177-182). EXCEPTION: v14's `has()` short-circuits on Administrator
+   before resolving the flag string, so in guilds that granted the bot an
+   Administrator role the function executes fully and role rewards WORK. Verified
+   empirically on the deployed discord.js 14.6.0. The stock invite URL grants
+   neither ManageRoles nor Administrator, so default-invited guilds have dead
+   rewards. Additional hazard: doRewardRoles is invoked WITHOUT await inside
+   try/catch from award/revoke/clear, so in Administrator guilds a rejected
+   `roles.add`/`roles.remove` (e.g. role above the bot) becomes an unhandled
+   promise rejection, which crashes the process under Node 18 defaults.
+   (`guild.me` is removed in v14, but the fallback
+   `guild.members.fetch(client.user.id)` works.)
 2. **BUG — cooldowns are never enforced.** `cooldown: 10` on stats/suggest,
    `client.cooldowns` collection, and `showCooldown()` all exist; nothing checks them.
 3. **BUG — "Always Name" dedication never uses the live username**: `user?.username` on a

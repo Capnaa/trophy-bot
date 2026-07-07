@@ -1,6 +1,6 @@
 # Utility Commands — Validated Specification
 
-Validated against the actual JavaScript source (`commands/bot/*.js`, `events/command.js`, `events/button.js`, `globals.js`) on 2026-07-07. The JS code is the only source of truth; where DISCORD_COMMANDS_DOCUMENTATION.md or CLAUDE.md disagree with the code, the code wins and the discrepancy is noted. `TrophyBot-Copy/` was ignored.
+Validated against the actual JavaScript source (`commands/bot/*.js`, `events/command.js`, `events/button.js`, `globals.js`) on 2026-07-07. The JS code is the only source of truth; where DISCORD_COMMANDS_DOCUMENTATION.md or CLAUDE.md disagree with the code, the code wins and the discrepancy is noted. `TrophyBot-Copy/` was ignored. The superseded documents referenced in the discrepancy sections live in `docs/archive/`.
 
 ## Shared dispatcher behavior (applies to all commands below)
 
@@ -122,7 +122,7 @@ All slash commands run through `events/command.js`:
 **Discrepancies with prior docs**
 - CLAUDE.md ("'imsafe' mode required for management commands") and DISCORD_COMMANDS_DOCUMENTATION.md omit that new guilds default to safe, and that the dev ID bypasses the check.
 
-**Rust target:** Do not reimplement the gate — the custom permission system is gone and Discord-native permissions are the only mechanism, so the flag becomes unnecessary. Keep the `is_safe` column only if needed during data migration for historical record; `/imsafe` can be dropped or turned into a no-op informational reply.
+**Rust target:** Do not reimplement the gate — the custom permission system is gone and Discord-native permissions are the only mechanism, so the flag becomes unnecessary. Keep the `is_safe` column only if needed during data migration for historical record; the `/imsafe` command is KEPT as a no-op confirmation reply ("already safe") for continuity, while the gate itself is retired (Discord native permissions only) — see rust-parity-plan.md §1.
 
 ## /invite
 

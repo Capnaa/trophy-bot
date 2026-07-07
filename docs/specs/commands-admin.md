@@ -1,7 +1,7 @@
 # Server Administration Commands — Validated Spec
 
 Validated against the actual Node.js source code (discord.js v14.6, quick.db 7.1.3) on 2026-07-07.
-Source of truth: `commands/manage/export.js`, `panel.js`, `perms.js`, `rewards.js`, `settings.js` and shared code in `globals.js` / `events/command.js`. Prior markdown docs (DISCORD_COMMANDS_DOCUMENTATION.md, CLAUDE.md) are AI-generated and are corrected here where wrong.
+Source of truth: `commands/manage/export.js`, `panel.js`, `perms.js`, `rewards.js`, `settings.js` and shared code in `globals.js` / `events/command.js`. Prior markdown docs (DISCORD_COMMANDS_DOCUMENTATION.md, CLAUDE.md) are AI-generated and are corrected here where wrong. The superseded documents referenced in the discrepancy sections live in `docs/archive/`.
 
 **Shared dispatch behavior (events/command.js):** every command is publicly deferred with `interaction.deferReply()` (command.js:14) — no command in this scope ever replies ephemerally, regardless of code comments. The `imsafe` gate applies ONLY to commands exporting a `permissions` array (command.js:39-44): among this scope that is `/panel` (`['manage_users']`, panel.js:5) and `/rewards` (`['manage_rewards']`, rewards.js:5). `/export`, `/permissions` and `/settings` have no `permissions` field and are NOT gated. When gated and `data.${guild}.imsafe` is falsy, `imsafeWarning()` (globals.js:21-31) is shown instead of running. New guilds are initialized with `imsafe: true` (globals.js:437), so the gate only affects pre-1.4 guilds. A `client.cooldowns` collection is created (events/ready.js:28) but no cooldown enforcement exists in the dispatcher; declared `cooldown` fields are dead.
 
@@ -179,7 +179,7 @@ Source of truth: `commands/manage/export.js`, `panel.js`, `perms.js`, `rewards.j
 - BUG (off-by-one): limit check allows 21 rewards (rewards.js:86).
 - BUG (stuck rewards): `remove` requires the role to still exist in the guild (rewards.js:126-135); a reward pointing at a deleted role can only be removed via `/rewards clear`.
 - QUIRK: removing/clearing rewards never retro-updates members' roles (explicitly stated in the remove footer); roles change only on the next award/revoke/clear of each user.
-- QUIRK (probable v14 regression, globals.js:171-182): `guild.me` does not exist in discord.js v14 (fetch fallback saves it), and `permissions.has('MANAGE_ROLES')` uses a v13 flag name — in v14 this throws and the `catch` silently aborts `doRewardRoles`, meaning role rewards are likely never applied at all in the current deployment.
+- QUIRK (probable v14 regression, globals.js:171-182): `guild.me` does not exist in discord.js v14 (fetch fallback saves it), and `permissions.has('MANAGE_ROLES')` uses a v13 flag name — in v14 this throws and the `catch` silently aborts `doRewardRoles`, meaning role rewards are never applied in the current deployment — EXCEPT in guilds where the bot has Administrator, since v14's `has()` short-circuits on Administrator before resolving the invalid flag string and role rewards work there (see core-behaviors.md).
 
 **Discrepancies with prior docs:**
 - The command description string bug is noted in DISCORD_COMMANDS_DOCUMENTATION.md, but CLAUDE.md reproduces "`/rewards add` - Add permissions to a role." as if it were the intended description.

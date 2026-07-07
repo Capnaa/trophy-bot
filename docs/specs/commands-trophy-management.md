@@ -4,7 +4,8 @@ This document describes the REAL behavior of the trophy lifecycle commands, vali
 directly against the JavaScript source code (discord.js v14 + quick.db 7.1.3) on 2026-07-07.
 The only source of truth is the code in `commands/manage/*.js`, `globals.js` and
 `events/command.js`. Prior AI-generated docs (DISCORD_COMMANDS_DOCUMENTATION.md,
-CLAUDE.md) contain errors; discrepancies are called out per command.
+CLAUDE.md) contain errors; discrepancies are called out per command. The superseded
+documents referenced in the discrepancy sections live in `docs/archive/`.
 
 ## Shared behavior (events/command.js, globals.js)
 
@@ -33,7 +34,7 @@ This is the resolver used by award, revoke, delete, edit, details (and show). Ex
 
 Called after award/revoke/clear, always wrapped in an empty `catch` by callers.
 
-- BUG (high confidence, code-level): `me.permissions.has('MANAGE_ROLES')` (`globals.js:178`) uses the discord.js **v13** flag name. In v14 (`package.json`: `discord.js ^14.6.0`) permission flags are PascalCase (`ManageRoles`); the string `'MANAGE_ROLES'` makes `BitField.resolve` throw, the surrounding try/catch returns (`globals.js:180-182`), and **role rewards are silently never applied**. (`guild.me` at `globals.js:171` is also undefined in v14, but there is a fetch fallback.)
+- BUG (high confidence, code-level): `me.permissions.has('MANAGE_ROLES')` (`globals.js:178`) uses the discord.js **v13** flag name. In v14 (`package.json`: `discord.js ^14.6.0`) permission flags are PascalCase (`ManageRoles`); the string `'MANAGE_ROLES'` makes `BitField.resolve` throw, the surrounding try/catch returns (`globals.js:180-182`), and **role rewards are silently never applied — EXCEPT in guilds where the bot has Administrator: v14's `has()` short-circuits on Administrator before resolving the invalid flag string, so role rewards WORK there (see core-behaviors.md)**. (`guild.me` at `globals.js:171` is also undefined in v14, but there is a fetch fallback.)
 - The score used is the **stored** `user.trophyValue` (`globals.js:199`), not a recomputed sum — any desync propagates to role decisions.
 - Rewards are stored sorted by requirement descending (sorted at insert time in rewards.js); with `stack_roles = 0` all qualifying roles are awarded, otherwise only the highest, with lower/non-qualifying roles queued for removal.
 
@@ -206,7 +207,7 @@ None beyond trophy existence.
 ### Rust target
 
 - Keep: cascade removal of awards, image file cleanup, global counter maintenance (or derive counts by query instead).
-- Change: single transaction — soft-delete trophy row; `user_trophies` rows removed (or cascade via FK); score needs no fixup because it is always `SUM(value)` via JOIN; recompute role rewards for affected users (or accept eventual recompute on next award). Add a confirmation button for destructive delete. Trophy identified by unique name.
+- Change: single transaction — hard delete of the trophy row; `user_trophies` rows removed automatically via ON DELETE CASCADE (per ADR 0002 — no soft deletes); score needs no fixup because it is always `SUM(value)` via JOIN; recompute role rewards for affected users (or accept eventual recompute on next award). Add a confirmation button for destructive delete. Trophy identified by unique name.
 
 ---
 
@@ -392,5 +393,5 @@ None beyond trophy existence.
 - **Name resolution**: replicate getTrophy's user-facing ergonomics (case/punctuation-insensitive, substring) as *autocomplete* over the unique per-guild name, but command execution should resolve an exact (case-insensitive) unique name — no silent lowest-ID tiebreaks, no empty-string match-all, no ID/path-injection branch (UUIDv7 PKs are internal only).
 - **Score**: always `SUM(trophies.value)` via JOIN over `user_trophies`; never store it. This retires the entire class of trophyValue-desync bugs (revoke pop bug, NaN poisoning, cleanse mismatches).
 - **Role rewards**: reimplement correctly (the Node version is dead code under v14) and recompute after award/revoke/clear inside/after the transaction.
-- **Awards**: one row per award with `awarded_by` and timestamps; migrated legacy awards get synthetic timestamps and `awarded_by` NULL/0.
+- **Awards**: one row per award with `awarded_by` and timestamps; migrated legacy awards get synthetic timestamps and `awarded_by` NULL.
 - **Images**: keep files on disk; DB stores the filename/URL string as-is; fix edit to store filenames consistently and enforce size/type from attachment metadata before download.

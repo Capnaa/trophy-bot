@@ -1,6 +1,6 @@
 # Trophy Bot documentation
 
-Documentation for the Rust rewrite of Trophy Bot. All content here is validated against the real Node.js source and production data — earlier scattered markdown docs were consolidated into this tree and removed.
+Documentation for the Rust rewrite of Trophy Bot. All content here is validated against the real Node.js source and production data — earlier scattered markdown docs were consolidated into this tree and archived under `docs/archive/`.
 
 ## Structure
 
@@ -18,7 +18,8 @@ Documentation for the Rust rewrite of Trophy Bot. All content here is validated 
 | [specs/core-behaviors.md](specs/core-behaviors.md) | globals.js shared functions, events, dispatch/permission flow, background tasks |
 | [specs/data-model-legacy.md](specs/data-model-legacy.md) | quick.db JSON structures, verified production statistics, data anomalies |
 | [specs/migration-import.md](specs/migration-import.md) | Legacy → normalized DB import algorithm, validation report, cutover runbook |
-| [specs/rust-parity-plan.md](specs/rust-parity-plan.md) | Master remediation plan: command parity table, every defect → its fix (F1–F35), intentional deltas, acceptance criteria |
+| [specs/rust-parity-plan.md](specs/rust-parity-plan.md) | Master remediation plan: command parity table, every defect → its fix (F1–F37), intentional deltas, acceptance criteria |
+| [specs/schema.md](specs/schema.md) | Definitive column-level database schema: tables, types, nullability, indexes, portability notes |
 
 ## Conventions
 

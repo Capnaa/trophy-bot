@@ -34,7 +34,7 @@ Trophy selection everywhere: by **name** (unique per guild, ADR 0005) with slash
 | No reply is ever ephemeral (dispatcher always defers publicly) | Per-command ephemeral where intended: `/invite`, `/support`, `/details`, `/export`, and all error replies |
 | Cooldowns declared but never enforced | Poise built-in cooldowns (`/stats`, `/suggest`: 10s) |
 | Admin/permission checks use v13 flag strings → always false or throwing | Serenity typed `Permissions`; checked at registration (`default_member_permissions`) and defensively at runtime |
-| Role rewards completely dead under d.js v14 (silent throw in `doRewardRoles`) | Working reward engine: on award/revoke/clear, recompute the user's target role set from score + `stack_roles` setting, diff against current roles, apply respecting hierarchy; errors logged, never swallowed |
+| Role rewards dead under d.js v14 **except in guilds where the bot has Administrator** (v14 `has()` short-circuits before the invalid v13 flag resolves) — so live reward behavior exists in part of production; the unawaited async call is also a process-crash vector on hierarchy failures | Working reward engine everywhere with just ManageRoles: on award/revoke/clear, recompute the user's target role set from score + `stack_roles` setting, diff against current roles, apply respecting hierarchy — awaited, idempotent, errors logged, never swallowed |
 | Command counters increment even on error | Count successful executions; errors logged separately with context |
 | Errors silently swallowed (`catch {}` everywhere) | Every error path logs via `log` with guild/user/command context and answers the user with a friendly error embed |
 | Stored `trophyValue` desyncs | No stored score — computed `SUM` per ADR 0006 |
@@ -57,20 +57,22 @@ Trophy selection everywhere: by **name** (unique per guild, ADR 0005) with slash
 | F9 | `/award` never records who awarded | `user_trophies.awarded_by` recorded (NULL only for imported legacy rows) |
 | F10 | `/delete` never recomputes role rewards and unlinks `./images/null` when imageless | FK cascade removes awards; reward recompute triggered for affected users; image unlink only when an image exists, errors logged |
 | F11 | `/details` public + bypasses permission gate | Ephemeral reply; Manage Guild permission enforced like its siblings |
-| F12 | `getTrophy` path traversal (`1.name` resolves), substring matching, emoji-only input matches everything | Exact normalized-name resolution + autocomplete; parameterized queries make traversal impossible |
+| F12 | `getTrophy` path traversal (`1.name` "resolves" and `/award` then adds NaN to the score), substring matching, emoji-only input matches everything | Exact normalized-name resolution + autocomplete; parameterized queries make traversal impossible |
+| F37 | `/edit` change report cosmetics: editing a dedication to the same value counts as a change; removing with `-` prints "> null" | Accurate change report (cosmetic; fixed as part of the `/edit` response formatting) |
 
 ### 3.2 User-facing
 
 | # | Defect | Fix |
 |---|---|---|
-| F13 | `/leaderboard` crashes on departed users with formats 1–3 (uncaught fetch) | Fallback to stored/"Unknown user" display; never crash |
+| F13 | `/leaderboard` AND the panel renderer crash on departed users with formats 1–3 (uncaught fetch; panels silently stop updating) | Shared rendering path with fallback to stored/"Unknown user" display; never crash |
 | F14 | Rank numbers/medals computed from the raw unclamped `page` option | Clamp page first; ranks always consistent |
 | F15 | Zero-score users excluded by truthiness; total = visible rows only | Users with awards appear even at score 0; total = real server total |
 | F16 | Quit-user detection depends on gateway cache heuristics | Explicit membership check with documented fallback; `hide_quit_users` setting honored deterministically |
 | F17 | `/show` throws if the local image file is missing | Graceful fallback to the default trophy image; warning logged |
 | F18 | `/trophies user` shows "undefined's Trophies" on failed fetch | Proper fallback name |
 | F19 | `/trophies guild` manager/admin exemptions are dead code | Implement the documented INTENT: users with Manage Guild see unused trophies regardless of the setting |
-| F20 | Orphaned award IDs silently skipped in displays but counted in stored score | Impossible by FK; importer drops+reports them (migration-import.md) |
+| F20 | Orphaned award IDs silently skipped in displays but counted in stored score | Impossible by FK; importer drops+reports them (migration-import.md; production currently has 0) |
+| F36 | Dedication display mode 1 ("Always Name") never shows the live username (`GuildMember.username` undefined in v14) — always falls back to the stored creation-time name | Implement mode 1 correctly: resolve the live display name, fall back to the stored `dedication_text` |
 
 ### 3.3 Administration
 
@@ -102,9 +104,9 @@ Trophy selection everywhere: by **name** (unique per guild, ADR 0005) with slash
 Users may notice these; everything else must feel identical.
 
 1. **Trophy identification**: name + autocomplete instead of numeric IDs; footers show the name, not "Trophy ID: N" (ADR 0004/0005).
-2. **Renamed legacy duplicates**: ~198 guilds get colliding trophy names suffixed with their legacy ID at import (ADR 0005; per-guild report).
-3. **Scores are always exact**: computed from awards; users whose stored `trophyValue` had drifted will see the corrected number (ADR 0006).
-4. **Role rewards start working again** — they have been silently dead in production since the d.js v14 upgrade; users will see roles being assigned "for the first time".
+2. **Renamed legacy duplicates**: 641 colliding trophy names across 209 guilds get their legacy ID suffixed at import (ADR 0005; per-guild report). Normalization is Unicode-aware so non-Latin names are NOT falsely renamed.
+3. **Scores are always exact**: computed from awards; the 54 users whose stored `trophyValue` had drifted will see the corrected number, and the 44 float-valued trophies are rounded to integers (ADR 0006; import report).
+4. **Role rewards work everywhere** — under d.js v14 they only worked in guilds where the bot had Administrator (dead elsewhere). After cutover the engine works with plain ManageRoles; in previously-dead guilds users will see reward roles appear on their first score change. Existing role state in Administrator guilds is respected: the recompute is idempotent.
 5. **The 150-trophies-per-guild limit is kept at cutover** for parity, but is now a config value, not a technical ceiling (ADR 0002).
 6. **`/imsafe` gate retired**: management commands rely on Discord permissions only.
 7. **Ephemeral where it was always intended** (§2) — some replies that used to be public become private.

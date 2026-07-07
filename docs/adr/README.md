@@ -15,3 +15,4 @@ Format: Status / Context / Decision / Consequences.
 - [0007 - Migrations embedded in the bot CLI](0007-embedded-migration-cli.md)
 - [0008 - Legacy data import as a dedicated CLI subcommand](0008-legacy-import-as-cli-subcommand.md)
 - [0009 - Graceful shutdown on SIGINT/SIGTERM](0009-graceful-shutdown.md)
+- [0010 - i18n via Fluent, locale from the interaction](0010-i18n-fluent-interaction-locale.md)

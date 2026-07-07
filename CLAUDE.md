@@ -11,7 +11,8 @@ Trophy Bot is a Discord gamification bot: server admins create custom trophies (
 Validated documentation lives in `docs/` (see `docs/README.md`):
 
 - **`docs/specs/README.md` — complete command index**: every command, what it really does, and its defects. Start here.
-- **`docs/specs/rust-parity-plan.md` — master implementation checklist**: command parity table, every defect mapped to its fix (F1–F35), intentional behavior deltas, cutover acceptance criteria. Implementation work tracks against this document.
+- **`docs/specs/rust-parity-plan.md` — master implementation checklist**: command parity table, every defect mapped to its fix (F1–F37), intentional behavior deltas, cutover acceptance criteria. Implementation work tracks against this document.
+- `docs/specs/schema.md` — definitive column-level database schema (tables, types, indexes); migrations implement exactly this.
 - `docs/specs/*.md` — per-area functional specs validated against the JS source (claims cited as `file.js:line`), with defects marked **BUG**/**QUIRK** and a "Rust target" section per command. The Rust bot fixes BUGs; it does not reproduce them.
 - `docs/specs/data-model-legacy.md` — legacy quick.db structures, verified production statistics, data anomalies.
 - `docs/specs/migration-import.md` — legacy → normalized DB import algorithm, validation report, cutover runbook.

@@ -11,7 +11,7 @@ Every slash command of the production bot, what it REALLY does (validated agains
 | `/about` | Static info embed (GitHub, Ko-fi, support links) | — |
 | `/forgetme` | Owner-only + confirm button; deletes trophy image files, overwrites guild data with a `-1` tombstone (not a real delete), leaves the guild | Real deletion; unlink errors silently swallowed |
 | `/help` | Static usage guide | Content still teaches the deprecated custom permission system |
-| `/imsafe` | One-way flag `imsafe=true`; only gates commands declaring legacy `permissions`; new guilds are already created safe | Retired in Rust (Discord native permissions only) |
+| `/imsafe` | One-way flag `imsafe=true`; only gates commands declaring legacy `permissions`; new guilds are already created safe | Gate retired; command kept as a no-op confirmation |
 | `/invite` | Static OAuth2 URL | Meant to be ephemeral, actually public |
 | `/ping` | WS ping + interaction→defer time (not a real round trip) | Measure real latency |
 | `/stats` | Global counters (known inflated) + cache sizes + uptime | Compute from real DB data; 10s cooldown declared but never enforced |
@@ -55,7 +55,7 @@ Every slash command of the production bot, what it REALLY does (validated agains
 
 ## Cross-cutting defects (affect everything) — [core-behaviors.md](core-behaviors.md)
 
-- **Role rewards are completely dead under discord.js v14**: `doRewardRoles` throws on a v13 permission flag, error swallowed → no role has been assigned/removed by award/revoke/clear in the current deployment.
+- **Role rewards are dead under discord.js v14 EXCEPT in guilds where the bot has Administrator** (v14 permission check short-circuits before the invalid v13 flag resolves) — live behavior exists in production and the unawaited call is a process-crash vector; see core-behaviors.md.
 - **No reply is ever ephemeral**: the dispatcher always defers publicly.
 - **Cooldowns are never enforced** (infrastructure exists, nothing checks it).
 - **Admin detection always false** (v13 `'ADMINISTRATOR'` string compared under v14).
@@ -63,7 +63,7 @@ Every slash command of the production bot, what it REALLY does (validated agains
 
 ## Fixing it all in Rust
 
-The consolidated remediation plan — command parity table, every defect above mapped to its fix (F1–F35), the intentional ADR-backed behavior deltas, and the cutover acceptance criteria — lives in [rust-parity-plan.md](rust-parity-plan.md). That is the master checklist for implementation.
+The consolidated remediation plan — command parity table, every defect above mapped to its fix (F1–F37), the intentional ADR-backed behavior deltas, and the cutover acceptance criteria — lives in [rust-parity-plan.md](rust-parity-plan.md). That is the master checklist for implementation. The definitive column-level database schema is in [schema.md](schema.md).
 
 ## Data handling
 
