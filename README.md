@@ -10,7 +10,7 @@
   <a href = "https://github.com/AntikoreDev/trophy-bot/blob/main/LICENSE"><img alt = "License" src = "https://img.shields.io/github/license/AntikoreDev/trophy-bot?style=for-the-badge"></a>
 </div>
 
-With **Trophy Bot**, you can award trophies to users. You can create your own trophies per server with a custom name, description, image and even value, and assign them to users by doing stuff you think deserves to be awarded.
+With **Trophy Bot**, you can award trophies to users. You can create your own trophies per server with a custom name, description, image, and even value, and assign them to users by doing stuff you think deserves to be awarded.
 
 You can then give reward roles for reaching certain scores, or having a leaderboard for the user scores.
 
@@ -29,7 +29,10 @@ To get started, simply type `/help` in your server to see a few basic info.
 
 ## Tech
 
-Rewritten in **Rust** (Serenity + Poise + SeaORM) with a normalized database — SQLite for local development, PostgreSQL for production, selected by `DATABASE_URL`. The previous Node.js implementation was fully migrated: same commands and features, with its known bugs fixed. See [docs/](docs/README.md) for specs, architecture decisions and the migration plan.
+Rewritten in **Rust** (Serenity + Poise + SeaORM) with a normalized database, SQLite for local development, PostgreSQL for production, selected by `DATABASE_URL`.
+The previous Node.js implementation was fully migrated: same commands and features, with its known bugs fixed.
+
+See [docs/](docs/README.md) for specs, architecture decisions, and the migration plan.
 
 ## Running
 
