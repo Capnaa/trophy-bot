@@ -132,18 +132,19 @@ impl DebounceQueue {
         self.pending.values().min().copied()
     }
 
-    /// Removes and returns every guild whose deadline has passed.
-    pub(crate) fn take_due(&mut self, now: Instant) -> Vec<i64> {
-        let due: Vec<i64> = self
+    /// Removes and returns the single earliest-due guild, if any. The run
+    /// loop drains due guilds one per select-iteration (F1) so it stays
+    /// responsive to shutdown and incoming signals instead of blocking on the
+    /// whole batch; Serenity's HTTP layer paces the actual API calls.
+    pub(crate) fn take_one_due(&mut self, now: Instant) -> Option<i64> {
+        let guild_id = self
             .pending
             .iter()
             .filter(|(_, deadline)| **deadline <= now)
-            .map(|(guild_id, _)| *guild_id)
-            .collect();
-        for guild_id in &due {
-            self.pending.remove(guild_id);
-        }
-        due
+            .min_by_key(|(_, deadline)| **deadline)
+            .map(|(guild_id, _)| *guild_id)?;
+        self.pending.remove(&guild_id);
+        Some(guild_id)
     }
 }
 
@@ -579,8 +580,12 @@ pub async fn run(
                     log::warn!("Panel sweep tick skipped: previous sweep still running");
                 }
             }
+            // One due guild per iteration: the loop re-enters select! after
+            // each refresh, so a burst of due panels can't starve shutdown or
+            // signal handling (F1). Remaining due guilds re-fire immediately
+            // (their deadline is already past), interleaved with the other arms.
             _ = tokio::time::sleep_until(wake), if deadline.is_some() => {
-                for guild_id in queue.take_due(Instant::now()) {
+                if let Some(guild_id) = queue.take_one_due(Instant::now()) {
                     match refresh_guild(&db, &cache_http, guild_id).await {
                         Ok(fate) => log::debug!("Panel refresh for guild {guild_id}: {fate:?}"),
                         Err(error) => {
@@ -629,30 +634,51 @@ mod tests {
     }
 
     #[test]
-    fn take_due_returns_only_expired_guilds_and_removes_them() {
+    fn take_one_due_returns_the_single_earliest_due_guild() {
+        // The run loop drains due guilds ONE per select-iteration so it can
+        // keep polling shutdown/signals between refreshes (F1) instead of
+        // blocking on the whole batch. take_one_due returns the earliest-due
+        // guild and removes only it.
         let mut queue = DebounceQueue::new(Duration::from_secs(5));
         let start = Instant::now();
-        queue.signal(1, start);
-        queue.signal(2, start + Duration::from_secs(4));
+        queue.signal(1, start); // deadline +5s
+        queue.signal(2, start + Duration::from_secs(1)); // deadline +6s
 
-        // At +5s only guild 1 is due; guild 2 stays queued.
-        let due = queue.take_due(start + Duration::from_secs(5));
-        assert_eq!(due, vec![1]);
-        assert_eq!(queue.next_deadline(), Some(start + Duration::from_secs(9)));
-
-        // Once taken, a guild is gone until it signals again.
-        assert!(queue.take_due(start + Duration::from_secs(5)).is_empty());
-        let due = queue.take_due(start + Duration::from_secs(10));
-        assert_eq!(due, vec![2]);
+        // Nothing due before the first deadline.
+        assert_eq!(queue.take_one_due(start + Duration::from_secs(4)), None);
+        // At +5s only guild 1 is due, and only it is removed.
+        assert_eq!(queue.take_one_due(start + Duration::from_secs(5)), Some(1));
+        assert_eq!(queue.take_one_due(start + Duration::from_secs(5)), None);
+        assert_eq!(queue.next_deadline(), Some(start + Duration::from_secs(6)));
+        // Guild 2 becomes due at +6s.
+        assert_eq!(queue.take_one_due(start + Duration::from_secs(6)), Some(2));
         assert_eq!(queue.next_deadline(), None);
     }
 
     #[test]
-    fn signal_after_take_due_schedules_a_fresh_deadline() {
+    fn take_one_due_drains_a_simultaneous_batch_one_at_a_time() {
+        let mut queue = DebounceQueue::new(Duration::from_secs(5));
+        let start = Instant::now();
+        for g in [1, 2, 3] {
+            queue.signal(g, start);
+        }
+        let now = start + Duration::from_secs(5);
+        let mut drained = vec![
+            queue.take_one_due(now).unwrap(),
+            queue.take_one_due(now).unwrap(),
+            queue.take_one_due(now).unwrap(),
+        ];
+        drained.sort();
+        assert_eq!(drained, vec![1, 2, 3], "all three eventually drained");
+        assert_eq!(queue.take_one_due(now), None);
+    }
+
+    #[test]
+    fn signal_after_take_one_due_schedules_a_fresh_deadline() {
         let mut queue = DebounceQueue::new(Duration::from_secs(5));
         let start = Instant::now();
         queue.signal(1, start);
-        queue.take_due(start + Duration::from_secs(6));
+        queue.take_one_due(start + Duration::from_secs(6));
         queue.signal(1, start + Duration::from_secs(6));
         assert_eq!(queue.next_deadline(), Some(start + Duration::from_secs(11)));
     }
