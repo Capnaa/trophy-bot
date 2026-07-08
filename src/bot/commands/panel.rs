@@ -2,8 +2,9 @@
 //! (batch C13).
 //!
 //! Spec: docs/specs/commands-admin.md §/panel. Fixes applied:
-//! - F30: `create` best-effort deletes the previous panel message before
-//!   sending the replacement (legacy orphaned it forever); `delete` also
+//! - F30: `create` best-effort deletes the previous panel message after the
+//!   replacement was sent (legacy orphaned it forever) — send-new-first so a
+//!   failed render/send never destroys a working panel; `delete` also
 //!   deletes the Discord message, not just the record.
 //! - F31: the DB record is written ONLY after the panel message was
 //!   successfully sent — a failed send leaves no record (legacy persisted a
@@ -56,12 +57,6 @@ async fn create(ctx: Context<'_>) -> Result<(), Error> {
     // lookups), so acknowledge early; the confirmation stays ephemeral.
     ctx.defer_ephemeral().await?;
 
-    // F30: replace semantics — drop the previous panel message (best
-    // effort, logged inside) so it is not orphaned in its channel.
-    if let Some(old) = panel_updater::get_panel(db, guild_id.get() as i64).await? {
-        panel_updater::delete_panel_message(ctx.serenity_context(), &old).await;
-    }
-
     let panel_locale = i18n::resolve(None);
     let guild_name = ctx
         .guild()
@@ -79,6 +74,8 @@ async fn create(ctx: Context<'_>) -> Result<(), Error> {
     .await?;
 
     // F31: send first; the record exists only for a message that exists.
+    // The new message is sent BEFORE the old panel is touched, so a failed
+    // render/send leaves any existing panel fully intact (message + record).
     let message = match ctx
         .channel_id()
         .send_message(ctx.serenity_context(), serenity::CreateMessage::new().embed(embed))
@@ -94,6 +91,13 @@ async fn create(ctx: Context<'_>) -> Result<(), Error> {
             return util::reply_error(ctx, i18n::t(&locale, "panel-create-failed"), true).await;
         }
     };
+
+    // F30: replace semantics — drop the previous panel message (best
+    // effort, logged inside) so it is not orphaned in its channel. Done
+    // only after the replacement exists.
+    if let Some(old) = panel_updater::get_panel(db, guild_id.get() as i64).await? {
+        panel_updater::delete_panel_message(ctx.serenity_context(), &old).await;
+    }
 
     panel_updater::save_panel(
         db,
