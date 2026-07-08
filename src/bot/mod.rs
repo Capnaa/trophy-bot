@@ -1,3 +1,4 @@
+pub mod buttons;
 pub mod commands;
 pub mod images;
 pub mod render;
@@ -65,6 +66,9 @@ impl Bot {
             .options(poise::FrameworkOptions {
                 commands: commands::all(),
                 on_error: |error| Box::pin(handle_framework_error(error)),
+                event_handler: |ctx, event, framework, data| {
+                    Box::pin(buttons::handle_event(ctx, event, framework, data))
+                },
                 ..Default::default()
             })
             .setup(move |ctx, _ready, framework| {
