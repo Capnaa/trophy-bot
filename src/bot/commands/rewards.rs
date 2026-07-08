@@ -20,6 +20,19 @@
 //! with the caller's score in the description; removing/clearing rewards
 //! never retro-updates members' roles (stated in the remove footer) — role
 //! reconciliation happens on score changes (award/revoke/clear batch).
+//!
+//! DELIBERATE SPEC-CONFLICT RESOLUTION (reviewed): commands-admin.md
+//! §/rewards "Rust target" asks to "apply/reconcile roles ... whenever
+//! rewards change", but rust-parity-plan.md wins here:
+//! - §2 scopes the reward engine to award/revoke/clear;
+//! - §3 F21–F25 is the complete /rewards fix list and excludes it;
+//! - §4 delta 4 states roles appear "on their first score change";
+//! - Principle 3: absent an ADR-backed delta, legacy behavior wins — and
+//!   legacy QUIRK (commands-admin.md, rewards.js:176-182) is exactly this,
+//!   surfaced to users in the remove footer.
+//! A guild-wide reconcile inside a slash-command handler would also be an
+//! unbounded fan-out of role API calls; if wanted, it belongs to the
+//! background-work batch (§3.4) next to the panel sweep, not here.
 //! New: explicit empty-state message on `list` (the legacy zero-width-space
 //! trick would be a 400 on Discord's current API).
 
