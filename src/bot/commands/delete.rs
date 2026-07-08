@@ -10,6 +10,15 @@
 //! - F12 (shared): trophy resolved by exact normalized name with autocomplete
 //!   (`src/bot/resolver.rs`) — no numeric-ID branch, no path traversal.
 //!
+//! TODO(follow-up, blocked on C16): the spec's Rust target
+//! (docs/specs/commands-trophy-management.md §/delete, "Add a confirmation
+//! button for destructive delete") is intentionally deferred — the
+//! implementation plan scopes this batch (C9) to F10 only, and the button
+//! interaction infrastructure lands with C16 (`/forgetme`). Once C16's
+//! button infra exists, wire a confirm/cancel step in front of
+//! `delete_trophy` here. Until then /delete matches legacy behavior
+//! (no confirmation step).
+//!
 //! Score needs no fixup (ADR 0006: never stored — every reader recomputes
 //! `SUM(value)`, which drops automatically once the awards cascade away).
 //! The global created-trophies counter of the legacy bot is gone too: counts
