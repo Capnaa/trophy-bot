@@ -811,9 +811,14 @@ async fn report_serializes_to_json_with_summary() {
     // images kept and 278 orphan disk files (Phase 6).
     assert_eq!(
         row("defaulted_trophies"),
-        (2, 43),
-        "fixture trophies 100/2 (most fields) and 100/3 (description, emoji) are incomplete; \
-         each counts once regardless of how many fields were defaulted"
+        (1, 43),
+        "only fixture trophy 100/2 misses CORE fields (creator/created/signed); 100/3 misses \
+         only description+emoji, which never count toward the spec's 43 incomplete trophies"
+    );
+    assert_eq!(
+        row("defaulted_details"),
+        (1, 360),
+        "fixture trophy 100/2 also misses `details` (expected legacy shape, tracked separately)"
     );
     assert_eq!(row("empty_award_users"), (1, 1_284), "fixture user 501 has an empty array");
     assert_eq!(row("settings_rows"), (1, 162), "guild 100 only; empty settings get no row");
@@ -821,11 +826,12 @@ async fn report_serializes_to_json_with_summary() {
     assert_eq!(row("orphan_disk_files"), (0, 278), "no images dir in this fixture");
 }
 
-/// The spec's expected 43 counts incomplete TROPHIES, but `defaulted_fields`
-/// records one entry per absent FIELD: the summary metric must count distinct
-/// (guild, legacy_id) pairs.
+/// The spec's expected 43 counts incomplete TROPHIES (distinct per guild,
+/// missing a CORE field: creator/created/signed), while `defaulted_fields`
+/// records one entry per absent FIELD. `details`-only defaults are expected
+/// legacy shape and tracked in their own metric (expected 360).
 #[test]
-fn defaulted_trophies_counts_distinct_trophies_not_fields() {
+fn defaulted_trophies_counts_distinct_core_incomplete_trophies() {
     use super::report::{DefaultedField, ImportReport};
 
     let mut report = ImportReport::default();
@@ -833,7 +839,7 @@ fn defaulted_trophies_counts_distinct_trophies_not_fields() {
         (100, "2", "creator"),
         (100, "2", "created"),
         (100, "2", "signed"),
-        (100, "7", "details"),
+        (100, "7", "details"), // details-only: excluded from the 43-metric
         (300, "2", "creator"), // same legacy id, different guild
     ] {
         report.defaulted_fields.push(DefaultedField {
@@ -843,9 +849,10 @@ fn defaulted_trophies_counts_distinct_trophies_not_fields() {
         });
     }
 
-    assert_eq!(report.defaulted_trophies(), 3);
+    assert_eq!(report.defaulted_trophies(), 2, "100/2 and 300/2 miss core fields; 100/7 not");
+    assert_eq!(report.defaulted_details(), 1, "only 100/7 misses details");
     let rows = report.summary_rows();
     let (_, measured, expected) =
         rows.iter().find(|(n, _, _)| *n == "defaulted_trophies").expect("defaulted_trophies row");
-    assert_eq!((*measured, *expected), (3, 43));
+    assert_eq!((*measured, *expected), (2, 43));
 }

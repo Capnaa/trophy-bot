@@ -290,10 +290,21 @@ pub(crate) fn temp_filename(filename: &str) -> String {
 /// logged — the trophy then keeps serving the previous same-named file (or
 /// none), which beats having clobbered it before the update.
 pub(crate) async fn promote_image(temp: &str, dest: &str) {
-    let dir = std::path::Path::new(images::IMAGES_DIR);
+    promote_image_in(std::path::Path::new(images::IMAGES_DIR), temp, dest).await;
+}
+
+/// Directory-parameterized body of [`promote_image`] so tests run against a
+/// throwaway directory instead of the real `images/`.
+async fn promote_image_in(dir: &std::path::Path, temp: &str, dest: &str) {
     if let Err(err) = tokio::fs::rename(dir.join(temp), dir.join(dest)).await {
         log::error!("failed to promote trophy image {temp} -> {dest}: {err}");
-        images::remove(temp).await;
+        // Same traversal guard as images::remove, scoped to `dir`.
+        if images::is_plain_filename(temp)
+            && let Err(err) = tokio::fs::remove_file(dir.join(temp)).await
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("failed to drop temp image {temp}: {err}");
+        }
     }
 }
 
@@ -769,10 +780,18 @@ mod tests {
         assert_ne!(temp, stored);
     }
 
+    /// Unique throwaway dir under the OS temp dir — tests must never write
+    /// into the real `images/` (leftovers there would count as orphan disk
+    /// files in the import report).
+    fn scratch_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("trophy-bot-test-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[tokio::test]
     async fn promote_image_replaces_the_final_file_only_on_promotion() {
-        let dir = std::path::Path::new(images::IMAGES_DIR);
-        std::fs::create_dir_all(dir).unwrap();
+        let dir = scratch_dir();
         let dest = images::filename(1, Uuid::now_v7(), "png");
         let temp = temp_filename(&dest);
         std::fs::write(dir.join(&dest), b"old bytes").unwrap();
@@ -782,24 +801,23 @@ mod tests {
         // failure path only drops the temp and never touches the original).
         assert_eq!(std::fs::read(dir.join(&dest)).unwrap(), b"old bytes");
 
-        promote_image(&temp, &dest).await;
+        promote_image_in(&dir, &temp, &dest).await;
         assert_eq!(std::fs::read(dir.join(&dest)).unwrap(), b"new bytes");
         assert!(!dir.join(&temp).exists(), "temp file is consumed");
 
-        images::remove(&dest).await;
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
     async fn promote_image_with_missing_temp_leaves_the_final_file_alone() {
-        let dir = std::path::Path::new(images::IMAGES_DIR);
-        std::fs::create_dir_all(dir).unwrap();
+        let dir = scratch_dir();
         let dest = images::filename(1, Uuid::now_v7(), "png");
         std::fs::write(dir.join(&dest), b"old bytes").unwrap();
 
-        promote_image(&temp_filename(&dest), &dest).await;
+        promote_image_in(&dir, &temp_filename(&dest), &dest).await;
         assert_eq!(std::fs::read(dir.join(&dest)).unwrap(), b"old bytes");
 
-        images::remove(&dest).await;
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Same guard as in `create.rs`: after the PUBLIC image-path defer,

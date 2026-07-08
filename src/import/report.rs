@@ -176,16 +176,24 @@ impl ImportReport {
         (self.downloaded_images.len() + self.expired_image_urls.len()) as u64
     }
 
-    /// Distinct trophies with at least one defaulted field.
-    /// `defaulted_fields` is per-FIELD (a trophy missing e.g. both `creator`
-    /// and `signed` contributes two entries); the spec's expected count (43
-    /// incomplete trophies, migration-import.md Phase 3) counts TROPHIES.
+    /// Distinct trophies with a defaulted CORE field (`creator`, `created`,
+    /// `signed`) — the spec's "43 incomplete trophies" from the pre-rewrite
+    /// era (migration-import.md Phase 3 / data-model-legacy.md). The
+    /// `details`/`description`/`emoji` defaults are recorded per-field too
+    /// but tracked separately: missing `details` alone is expected legacy
+    /// shape (360 trophies), not pre-rewrite incompleteness.
     pub fn defaulted_trophies(&self) -> u64 {
         self.defaulted_fields
             .iter()
+            .filter(|d| matches!(d.field, "creator" | "created" | "signed"))
             .map(|d| (d.guild_id, d.legacy_id.as_str()))
             .collect::<std::collections::HashSet<_>>()
             .len() as u64
+    }
+
+    /// Trophies whose `details` field was absent and filled with the default.
+    pub fn defaulted_details(&self) -> u64 {
+        self.defaulted_fields.iter().filter(|d| d.field == "details").count() as u64
     }
 
     /// `(metric, measured, expected)` rows; expected values are the counts
@@ -197,6 +205,7 @@ impl ImportReport {
             ("corrupt_guilds", self.corrupt_guilds.len() as u64, 0),
             ("trophies", self.trophies, 10_853),
             ("defaulted_trophies", self.defaulted_trophies(), 43),
+            ("defaulted_details", self.defaulted_details(), 360),
             ("invalid_field_values", self.invalid_fields.len() as u64, 0),
             ("rounded_values", self.rounded_values.len() as u64, 44),
             ("renamed_trophies", self.renamed_trophies.len() as u64, 643),
