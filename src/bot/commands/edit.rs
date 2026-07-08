@@ -388,6 +388,14 @@ pub async fn edit(
         return util::reply_error(ctx, err.message(&locale), true).await;
     }
 
+    // Defer before the first slow await: resolve_dedication does a live
+    // to_user HTTP fetch (for a mention/ID dedication) and the image download
+    // follows — either can exceed Discord's ~3s window. Deferring only for the
+    // image left the no-image + cache-miss-dedication path timing out while
+    // still committing the edit. The defer is PUBLIC (success is public), so
+    // every error reply past this point uses `reply_error_ephemeral` (§2).
+    ctx.defer().await?;
+
     let dedication_pair = match dedication.as_deref() {
         None => None,
         Some(raw) => Some(resolve_dedication(&ctx, raw).await),
@@ -406,29 +414,24 @@ pub async fn edit(
     let plan = plan_edit(&current, request);
 
     if plan.changes.is_empty() {
-        return util::reply_error(ctx, i18n::t(&locale, "edit-error-no-changes"), true).await;
+        return util::reply_error_ephemeral(ctx, i18n::t(&locale, "edit-error-no-changes")).await;
     }
 
-    // Download (slow path) only after every check passed; defer so a large
-    // attachment can't time out the interaction. The DB stores the local
-    // filename, never the CDN URL (F6). The bytes land under a temp name and
-    // are only promoted over the final filename AFTER the DB update succeeds:
-    // a same-extension replacement reuses the stored filename, and writing it
-    // in place before the update would irrecoverably clobber the old image if
-    // the update then failed.
+    // Download (slow path) only after every check passed. The DB stores the
+    // local filename, never the CDN URL (F6). The bytes land under a temp name
+    // and are only promoted over the final filename AFTER the DB update
+    // succeeds: a same-extension replacement reuses the stored filename, and
+    // writing it in place before the update would irrecoverably clobber the
+    // old image if the update then failed.
     let old_image = current.image.clone();
     let new_image = plan.image.clone().filter(|_| image_plan.is_some());
     let temp_image = new_image.as_deref().map(temp_filename);
-    // Error replies past the public defer use `reply_error_ephemeral`: a
-    // plain followup could not make the error private (§2: all error replies
-    // are ephemeral).
-    if let (Some((url, _)), Some(temp)) = (&image_plan, &temp_image) {
-        ctx.defer().await?;
-        if let Err(err) = images::download(url, temp).await {
-            log::warn!("/edit image download failed (guild={guild_id}): {err:#}");
-            return util::reply_error_ephemeral(ctx, i18n::t(&locale, "create-error-image-download"))
-                .await;
-        }
+    if let (Some((url, _)), Some(temp)) = (&image_plan, &temp_image)
+        && let Err(err) = images::download(url, temp).await
+    {
+        log::warn!("/edit image download failed (guild={guild_id}): {err:#}");
+        return util::reply_error_ephemeral(ctx, i18n::t(&locale, "create-error-image-download"))
+            .await;
     }
 
     let updated = match apply_edit(db, current, &plan).await {
@@ -823,8 +826,20 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Same guard as in `create.rs`: after the PUBLIC image-path defer,
-    /// error replies must use `reply_error_ephemeral` (§2).
+    #[test]
+    fn handler_defers_before_slow_awaits() {
+        // resolve_dedication does a live to_user HTTP fetch for a mention/ID
+        // dedication; ctx.defer() MUST precede it (and the image download)
+        // or a cache-miss dedication times the interaction out.
+        let src = include_str!("edit.rs");
+        let handler = src.split("pub async fn edit").nth(1).expect("handler exists");
+        let defer = handler.find("ctx.defer()").expect("handler defers");
+        let dedication = handler.find("resolve_dedication(").expect("handler resolves dedication");
+        assert!(defer < dedication, "ctx.defer() must come before the to_user HTTP fetch");
+    }
+
+    /// Same guard as in `create.rs`: after the PUBLIC defer, error replies
+    /// must use `reply_error_ephemeral` (§2).
     #[test]
     fn errors_after_the_public_defer_are_ephemeral() {
         let src = include_str!("edit.rs");

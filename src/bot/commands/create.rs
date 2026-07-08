@@ -380,20 +380,23 @@ pub async fn create(
         },
     };
 
+    // Defer up front, before ANY slow await. precheck (DB), the image download
+    // and resolve_dedication (a live to_user HTTP fetch for a mention/ID
+    // dedication) can each exceed Discord's ~3s token window; deferring only
+    // for the image left the no-image + cache-miss-dedication path timing out
+    // while still committing the trophy. The defer is PUBLIC (the success embed
+    // is public), so every error reply past this point uses
+    // `reply_error_ephemeral` (§2: all error replies are ephemeral).
+    ctx.defer().await?;
+
     let db = &ctx.data().db;
     if let Some(err) = precheck(db, guild_id, &name).await? {
-        return util::reply_error(ctx, err.message(&locale), true).await;
+        return util::reply_error_ephemeral(ctx, err.message(&locale)).await;
     }
 
-    // Download (slow path) only after all checks passed; defer so the
-    // interaction never times out on a large attachment. Every error reply
-    // past this point uses `reply_error_ephemeral`: the defer is PUBLIC (the
-    // success embed is public), and a plain followup could not make the
-    // error private (§2: all error replies are ephemeral).
     let trophy_id = Uuid::now_v7();
     let mut image_file: Option<(String, Vec<u8>)> = None;
     if let Some((url, ext)) = image_plan {
-        ctx.defer().await?;
         let filename = images::filename(guild_id, trophy_id, ext);
         match images::download(&url, &filename).await {
             Ok(bytes) => image_file = Some((filename, bytes)),
@@ -505,6 +508,22 @@ mod tests {
         assert_eq!(ok_fields(), Ok(()));
         // All optionals absent.
         assert_eq!(validate_fields("x", None, None, 0, None, None), Ok(()));
+    }
+
+    #[test]
+    fn handler_defers_before_slow_awaits() {
+        // Discord kills the interaction token after ~3s without a response.
+        // `precheck` (DB) and `resolve_dedication` (a live to_user HTTP fetch
+        // for a mention/ID dedication) are slow awaits, so ctx.defer() MUST
+        // precede them — otherwise a cache-miss dedication on a no-image
+        // create times the interaction out while still committing the trophy.
+        let src = include_str!("create.rs");
+        let handler = src.split("pub async fn create").nth(1).expect("handler exists");
+        let defer = handler.find("ctx.defer()").expect("handler defers");
+        let precheck = handler.find("precheck(").expect("handler prechecks");
+        let dedication = handler.find("resolve_dedication(").expect("handler resolves dedication");
+        assert!(defer < precheck, "ctx.defer() must come before the precheck DB queries");
+        assert!(defer < dedication, "ctx.defer() must come before the to_user HTTP fetch");
     }
 
     #[test]
