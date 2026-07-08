@@ -181,14 +181,22 @@ async fn handle_forgetme(
             let image_files = purge_guild_data(&data.db, guild_id.get() as i64).await?;
 
             // 2. Acknowledge BEFORE leaving the guild, replacing the warning
-            //    (and its buttons) with the goodbye.
+            //    (and its buttons) with the goodbye. The data is already gone,
+            //    so a failed acknowledgement must NOT abort the flow: image
+            //    cleanup and the guild leave below run regardless.
             let embed = serenity::CreateEmbed::new()
                 .title(i18n::t(&locale, "forgetme-goodbye-title"))
                 .description(i18n::t(&locale, "forgetme-goodbye"))
                 .colour(util::COLOR_MAIN);
-            component
+            if let Err(err) = component
                 .create_response(&ctx.http, update_message(embed))
-                .await?;
+                .await
+            {
+                log::error!(
+                    "forgetme: failed to acknowledge purge of guild {}: {err}",
+                    guild_id.get()
+                );
+            }
 
             // 3. Best-effort image cleanup; `images::remove` logs failures
             //    instead of swallowing them (fixes the legacy no-op unlink).

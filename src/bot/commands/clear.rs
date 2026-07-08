@@ -55,6 +55,11 @@ pub async fn clear(
 
     let cleared = clear_awards(db, guild_id.get() as i64, user.id.get() as i64).await?;
 
+    // F29: the score board changed — request a debounced panel refresh.
+    if cleared > 0 {
+        ctx.data().panel_signal.notify(guild_id.get() as i64);
+    }
+
     // Reply first (the delete is committed), then apply reward roles: the
     // Discord-side work (member fetch + role calls) can be slow and must
     // never push the interaction past its acknowledgement deadline.

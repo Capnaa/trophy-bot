@@ -141,6 +141,9 @@ pub async fn revoke(
         .await;
     }
 
+    // F29: the score board changed — request a debounced panel refresh.
+    ctx.data().panel_signal.notify(guild_id.get() as i64);
+
     // Reply first (the deletion is committed), then apply reward roles: the
     // Discord-side work can be slow and must never push the interaction past
     // its acknowledgement deadline.

@@ -1,6 +1,7 @@
 pub mod buttons;
 pub mod commands;
 pub mod images;
+pub mod panel_updater;
 pub mod render;
 pub mod resolver;
 pub mod reward_apply;
@@ -20,6 +21,9 @@ pub struct Data {
     /// Connection pool to the normalized database (SQLite locally,
     /// PostgreSQL in production), opened from the CLI's `database_url`.
     pub db: DatabaseConnection,
+    /// F29: handle used by score-changing commands (award/revoke/clear) to
+    /// request a debounced refresh of the guild's leaderboard panel.
+    pub panel_signal: panel_updater::PanelSignal,
 }
 
 /// Unified command error type. Commands bubble errors up with `?`; the
@@ -34,6 +38,11 @@ pub struct Bot {
     shard_end: u32,
     shard_total: u32,
     test_guild_id: Option<GuildId>,
+    /// Background leaderboard-panel updater (F29-F32), joined on shutdown
+    /// per ADR 0009.
+    panel_task: tokio::task::JoinHandle<()>,
+    /// Flipped to `true` by `run` to stop the panel updater gracefully.
+    panel_shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl Bot {
@@ -45,10 +54,24 @@ impl Bot {
         let db = sea_orm::Database::connect(&args.database_url).await?;
         log::info!("Database connection established");
 
+        let (panel_signal, panel_signals) = panel_updater::signal_channel();
+        let (panel_shutdown, panel_shutdown_rx) = tokio::sync::watch::channel(false);
+
         let client = ClientBuilder::from(args)
             .application_id(id)
-            .framework(Self::framework(test_guild_id, db))
+            .framework(Self::framework(test_guild_id, db.clone(), panel_signal))
             .await?;
+
+        // Background panel updater (ADR 0009: stopped + joined by `run`).
+        let panel_task = tokio::task::spawn(panel_updater::run(
+            db,
+            panel_updater::CacheAndHttp {
+                cache: client.cache.clone(),
+                http: client.http.clone(),
+            },
+            panel_signals,
+            panel_shutdown_rx,
+        ));
 
         log::debug!("Bot {} initialized", id);
         Ok(Self {
@@ -57,11 +80,17 @@ impl Bot {
             shard_end: args.shard_end,
             shard_total: args.shard_total,
             test_guild_id,
+            panel_task,
+            panel_shutdown,
         })
     }
 
     #[inline]
-    fn framework(test_guild_id: Option<GuildId>, db: DatabaseConnection) -> impl Framework {
+    fn framework(
+        test_guild_id: Option<GuildId>,
+        db: DatabaseConnection,
+        panel_signal: panel_updater::PanelSignal,
+    ) -> impl Framework {
         poise::Framework::builder()
             .options(poise::FrameworkOptions {
                 commands: commands::all(),
@@ -82,7 +111,7 @@ impl Bot {
                         Command::set_global_commands(&ctx.http, builders).await?;
                         log::info!("Sync commands globally");
                     }
-                    Ok(Data { db })
+                    Ok(Data { db, panel_signal })
                 })
             })
             .build()
@@ -96,6 +125,8 @@ impl Bot {
             shard_end,
             shard_total,
             test_guild_id,
+            panel_task,
+            panel_shutdown,
         } = self;
 
         let http = client.http.clone();
@@ -125,7 +156,12 @@ impl Bot {
 
         shutdown_signal().await?;
         log::info!("Shutdown signal received, stopping shards");
+        // ADR 0009: background workers stop on the same signal.
+        let _ = panel_shutdown.send(true);
         shard_manager.shutdown_all().await;
+        if let Err(join_error) = panel_task.await {
+            log::error!("Panel updater task failed to join: {join_error}");
+        }
         runner.await?.map_err(|e| e.into())
     }
 }
