@@ -23,6 +23,10 @@ Documentation for the Rust rewrite of Trophy Bot. All content here is validated 
 | [specs/i18n.md](specs/i18n.md) | Localization: Fluent catalogs, locale resolution from the interaction, rules for command code |
 | [specs/implementation-plan.md](specs/implementation-plan.md) | Ordered code-migration plan: phases, command implementation order C0–C17 with their F-fixes, local validation gates |
 
+## Reviews
+
+- [reviews/2026-07-08-ultracode-migration-review.md](reviews/2026-07-08-ultracode-migration-review.md) — Final migration-review verdict: feature equivalence vs the Node.js bot, findings disposition (43 raised / 38 confirmed / 5 refuted), and residual risks before cutover.
+
 ## Conventions
 
 - Specs mark legacy defects explicitly as **BUG** (wrong behavior) or **QUIRK** (surprising but arguably intended). The Rust bot fixes BUGs unless an ADR says otherwise.

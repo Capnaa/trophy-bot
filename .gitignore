@@ -149,3 +149,10 @@ Thumbs.db
 # Added by cargo
 
 /target
+
+# Migration scratch artifacts
+gate.sqlite
+scratch-*.sqlite
+smoke.sqlite*
+import-report.json
+rdb.sqlite*
