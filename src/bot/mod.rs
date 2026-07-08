@@ -2,6 +2,7 @@ pub mod commands;
 pub mod images;
 pub mod render;
 pub mod resolver;
+pub mod reward_apply;
 pub mod util;
 
 use anyhow::Result;

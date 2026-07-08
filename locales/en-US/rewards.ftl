@@ -17,6 +17,7 @@ rewards-error-hierarchy = You can't manage a reward for { $role } because that r
 rewards-remove-success = ✅ { $role } is no longer a role reward.
 rewards-remove-footer = Members who already have this role will keep it; the bot only updates roles when a user's score changes.
 rewards-remove-error-not-a-reward = { $role } is not a role reward in this server.
+rewards-remove-error-invalid-role = That doesn't look like a role. Use a role mention or a raw role ID.
 
 ## Shared empty state (remove/clear on a server without rewards)
 rewards-error-no-rewards = This server has no role rewards.
