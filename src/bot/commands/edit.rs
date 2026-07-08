@@ -316,7 +316,10 @@ pub async fn edit(
     #[description = "The trophy to be edited"]
     #[autocomplete = "resolver::autocomplete_trophy"]
     trophy: String,
-    #[description = "The new name of the trophy."] name: Option<String>,
+    #[description = "The new name of the trophy."]
+    #[min_length = 1]
+    #[max_length = 32]
+    name: Option<String>,
     #[description = "The new description for the trophy"] description: Option<String>,
     #[description = "A new emoji for the trophy"] emoji: Option<String>,
     #[description = "A new dedication for the trophy. Use - to remove the current one"]

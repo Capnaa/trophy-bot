@@ -1,6 +1,7 @@
 # /create — en-US catalog (batch C1).
 
 # Validation errors (legacy limits, checked server-side before any persistence — F3).
+create-error-name-empty = The trophy needs a name with at least one visible character.
 create-error-name-too-long = The name of the trophy can't be longer than { $max } characters.
 create-error-details-too-long = The details of the trophy can't be longer than { $max } characters.
 create-error-description-too-long = The description of the trophy can't be longer than { $max } characters.

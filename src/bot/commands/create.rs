@@ -45,6 +45,9 @@ const DEFAULT_VALUE: i32 = 10;
 /// messages in `locales/en-US/create.ftl`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CreateError {
+    /// Name is empty or whitespace-only (would normalize to an empty
+    /// `normalized_name` and break guild-wide trophy autocomplete).
+    EmptyName,
     /// `field` is the ftl key fragment: name/details/description/emoji/dedication.
     FieldTooLong { field: &'static str, max: usize },
     ValueOutOfRange,
@@ -56,6 +59,7 @@ impl CreateError {
     /// Localized user-facing message for this rejection.
     pub(crate) fn message(&self, locale: &LanguageIdentifier) -> String {
         match self {
+            Self::EmptyName => i18n::t(locale, "create-error-name-empty"),
             Self::FieldTooLong { field, max } => i18n::t_args(
                 locale,
                 &format!("create-error-{field}-too-long"),
@@ -93,6 +97,12 @@ pub(crate) fn validate_fields(
 ) -> Result<(), CreateError> {
     let too_long = |text: Option<&str>, max: usize| text.is_some_and(|t| t.chars().count() > max);
 
+    // A blank name would store an empty normalized_name and emit an empty
+    // autocomplete choice, which Discord rejects (400) — breaking autocomplete
+    // for the whole guild. Discord options carry no min_length, so enforce here.
+    if name.trim().is_empty() {
+        return Err(CreateError::EmptyName);
+    }
     if too_long(Some(name), MAX_NAME_CHARS) {
         return Err(CreateError::FieldTooLong { field: "name", max: MAX_NAME_CHARS });
     }
@@ -316,7 +326,10 @@ async fn resolve_dedication(
 #[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD", required_permissions = "MANAGE_GUILD")]
 pub async fn create(
     ctx: Context<'_>,
-    #[description = "The name of the trophy."] name: String,
+    #[description = "The name of the trophy."]
+    #[min_length = 1]
+    #[max_length = 32]
+    name: String,
     #[description = "Description for the trophy"] description: Option<String>,
     #[description = "An emoji for the trophy, leave blank for default"] emoji: Option<String>,
     #[description = "How much this trophy values. Defaults to 10"]
@@ -492,6 +505,33 @@ mod tests {
         assert_eq!(ok_fields(), Ok(()));
         // All optionals absent.
         assert_eq!(validate_fields("x", None, None, 0, None, None), Ok(()));
+    }
+
+    #[test]
+    fn empty_or_whitespace_name_is_rejected() {
+        // Regression: a blank name persists with normalized_name == "" and,
+        // worse, becomes an empty autocomplete choice label — which Discord
+        // rejects (HTTP 400), breaking trophy autocomplete for EVERY command
+        // in the guild until the row is removed. Must be refused server-side
+        // (Discord options carry no min_length).
+        assert_eq!(
+            validate_fields("", None, None, 10, None, None),
+            Err(CreateError::EmptyName)
+        );
+        assert_eq!(
+            validate_fields("   ", None, None, 10, None, None),
+            Err(CreateError::EmptyName),
+            "whitespace-only also normalizes to empty"
+        );
+        assert_eq!(
+            validate_fields("\t\n ", None, None, 10, None, None),
+            Err(CreateError::EmptyName)
+        );
+        // A single visible character is still a valid name.
+        assert_eq!(validate_fields("x", None, None, 10, None, None), Ok(()));
+        // Punctuation/emoji-only names are unusual but addressable (they do
+        // NOT normalize to empty), so they remain allowed.
+        assert_eq!(validate_fields("!!!", None, None, 10, None, None), Ok(()));
     }
 
     #[test]
