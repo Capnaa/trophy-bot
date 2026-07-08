@@ -188,14 +188,14 @@ pub async fn show(
             &[("name", model.name.clone().into())],
         )));
 
-    if model.signed {
-        if let Some(creator) = model.creator_user_id {
-            embed = embed.field(
-                i18n::t(&locale, "show-field-signed"),
-                format!("<@{creator}>"),
-                true,
-            );
-        }
+    if model.signed
+        && let Some(creator) = model.creator_user_id
+    {
+        embed = embed.field(
+            i18n::t(&locale, "show-field-signed"),
+            format!("<@{creator}>"),
+            true,
+        );
     }
     if let Some(dedicated_to) = dedication {
         embed = embed.field(i18n::t(&locale, "show-field-dedicated"), dedicated_to, true);
@@ -373,6 +373,17 @@ mod tests {
         ] {
             assert_ne!(i18n::t_args(&locale, key, args), key, "missing ftl message: {key}");
         }
+    }
+
+    #[test]
+    fn value_renders_number_then_medal_like_legacy() {
+        // Legacy show.js:45 format is `{value} :medal:` — emoji AFTER the number.
+        let locale = i18n::resolve(None);
+        let message = i18n::t_args(&locale, "show-value", &[("value", 10.into())]);
+        assert!(
+            message.contains("10") && message.trim_end().ends_with(":medal:"),
+            "got: {message}"
+        );
     }
 
     #[test]
