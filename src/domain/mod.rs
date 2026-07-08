@@ -5,3 +5,6 @@ pub mod normalize;
 pub mod queries;
 pub mod rewards;
 pub mod settings;
+
+#[cfg(test)]
+pub(crate) mod test_support;

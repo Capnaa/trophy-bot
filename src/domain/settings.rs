@@ -44,6 +44,48 @@ impl Setting {
             Setting::LeaderboardFormat => row.leaderboard_format,
         }
     }
+
+    /// Effective value from an optional row: stored if present, else default.
+    fn resolve(self, row: Option<&guild_settings::Model>) -> i16 {
+        row.and_then(|row| self.stored(row))
+            .unwrap_or_else(|| self.default_value())
+    }
+}
+
+/// All five effective settings for a guild, resolved with the same
+/// NULL-falls-back-to-default logic as [`get_setting`]. Use this when a
+/// command needs more than one setting (e.g. leaderboard needs
+/// `hide_quit_users` + `leaderboard_format`) so only one row query runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveSettings {
+    pub dedication_display: i16,
+    pub stack_roles: i16,
+    pub hide_unused_trophies: i16,
+    pub hide_quit_users: i16,
+    pub leaderboard_format: i16,
+}
+
+impl EffectiveSettings {
+    fn from_row(row: Option<&guild_settings::Model>) -> Self {
+        Self {
+            dedication_display: Setting::DedicationDisplay.resolve(row),
+            stack_roles: Setting::StackRoles.resolve(row),
+            hide_unused_trophies: Setting::HideUnusedTrophies.resolve(row),
+            hide_quit_users: Setting::HideQuitUsers.resolve(row),
+            leaderboard_format: Setting::LeaderboardFormat.resolve(row),
+        }
+    }
+
+    /// Field access by [`Setting`], mirroring [`get_setting`]'s shape.
+    pub fn get(&self, setting: Setting) -> i16 {
+        match setting {
+            Setting::DedicationDisplay => self.dedication_display,
+            Setting::StackRoles => self.stack_roles,
+            Setting::HideUnusedTrophies => self.hide_unused_trophies,
+            Setting::HideQuitUsers => self.hide_quit_users,
+            Setting::LeaderboardFormat => self.leaderboard_format,
+        }
+    }
 }
 
 /// Effective value of one setting for a guild: the stored value if the row
@@ -54,20 +96,24 @@ pub async fn get_setting(
     setting: Setting,
 ) -> Result<i16, DbErr> {
     let row = guild_settings::Entity::find_by_id(guild_id).one(db).await?;
-    Ok(row
-        .and_then(|row| setting.stored(&row))
-        .unwrap_or_else(|| setting.default_value()))
+    Ok(setting.resolve(row.as_ref()))
+}
+
+/// All five effective settings for a guild in a single row query.
+pub async fn effective_settings(
+    db: &impl ConnectionTrait,
+    guild_id: i64,
+) -> Result<EffectiveSettings, DbErr> {
+    let row = guild_settings::Entity::find_by_id(guild_id).one(db).await?;
+    Ok(EffectiveSettings::from_row(row.as_ref()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
-    use sea_orm::{ActiveModelTrait, ConnectOptions, Database, DatabaseConnection, Set};
-    use sea_orm_migration::MigratorTrait;
+    use sea_orm::{ActiveModelTrait, Set};
 
-    use crate::entities::guilds;
-    use crate::migrations::Migrator;
+    use crate::domain::test_support::{fresh_db, insert_guild, now};
 
     const ALL: [Setting; 5] = [
         Setting::DedicationDisplay,
@@ -76,32 +122,6 @@ mod tests {
         Setting::HideQuitUsers,
         Setting::LeaderboardFormat,
     ];
-
-    async fn fresh_db() -> DatabaseConnection {
-        let mut options = ConnectOptions::new("sqlite::memory:");
-        options.max_connections(1).sqlx_logging(false);
-        let db = Database::connect(options)
-            .await
-            .expect("connect to in-memory sqlite");
-        Migrator::fresh(&db).await.expect("apply migrations");
-        db
-    }
-
-    fn now() -> chrono::NaiveDateTime {
-        Utc::now().naive_utc()
-    }
-
-    async fn insert_guild(db: &DatabaseConnection, id: i64) {
-        guilds::ActiveModel {
-            id: Set(id),
-            is_safe: Set(true),
-            created_at: Set(now()),
-            updated_at: Set(now()),
-        }
-        .insert(db)
-        .await
-        .expect("insert guild");
-    }
 
     #[test]
     fn defaults_match_spec() {
@@ -198,5 +218,83 @@ mod tests {
             Setting::StackRoles.default_value()
         );
         assert_eq!(get_setting(&db, 2, Setting::StackRoles).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn effective_settings_missing_row_yields_all_defaults() {
+        let db = fresh_db().await;
+        insert_guild(&db, 1).await;
+
+        let all = effective_settings(&db, 1).await.expect("read settings");
+        assert_eq!(
+            all,
+            EffectiveSettings {
+                dedication_display: 2,
+                stack_roles: 1,
+                hide_unused_trophies: 1,
+                hide_quit_users: 0,
+                leaderboard_format: 0,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_settings_mixes_stored_and_defaults_per_column() {
+        let db = fresh_db().await;
+        insert_guild(&db, 1).await;
+        guild_settings::ActiveModel {
+            guild_id: Set(1),
+            // Stored 0 differs from the default (2) and must be respected.
+            dedication_display: Set(Some(0)),
+            stack_roles: Set(None),
+            hide_unused_trophies: Set(None),
+            hide_quit_users: Set(Some(1)),
+            leaderboard_format: Set(Some(3)),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(&db)
+        .await
+        .expect("insert partial settings row");
+
+        let all = effective_settings(&db, 1).await.expect("read settings");
+        assert_eq!(
+            all,
+            EffectiveSettings {
+                dedication_display: 0,
+                stack_roles: Setting::StackRoles.default_value(),
+                hide_unused_trophies: Setting::HideUnusedTrophies.default_value(),
+                hide_quit_users: 1,
+                leaderboard_format: 3,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn effective_settings_agrees_with_get_setting() {
+        let db = fresh_db().await;
+        insert_guild(&db, 1).await;
+        guild_settings::ActiveModel {
+            guild_id: Set(1),
+            dedication_display: Set(Some(1)),
+            stack_roles: Set(Some(0)),
+            hide_unused_trophies: Set(Some(0)),
+            hide_quit_users: Set(None),
+            leaderboard_format: Set(Some(2)),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(&db)
+        .await
+        .expect("insert settings row");
+
+        let all = effective_settings(&db, 1).await.expect("read settings");
+        for setting in ALL {
+            assert_eq!(
+                all.get(setting),
+                get_setting(&db, 1, setting).await.unwrap(),
+                "{setting:?}"
+            );
+        }
     }
 }

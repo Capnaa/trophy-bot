@@ -87,41 +87,11 @@ pub async fn leaderboard(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
-    use sea_orm::{ActiveModelTrait, ConnectOptions, Database, DatabaseConnection, Set};
-    use sea_orm_migration::MigratorTrait;
+    use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
     use uuid::Uuid;
 
-    use crate::entities::{guilds, trophies, user_trophies};
-    use crate::migrations::Migrator;
-
-    async fn fresh_db() -> DatabaseConnection {
-        // Single connection: each pooled connection to `sqlite::memory:`
-        // would otherwise get its own private database.
-        let mut options = ConnectOptions::new("sqlite::memory:");
-        options.max_connections(1).sqlx_logging(false);
-        let db = Database::connect(options)
-            .await
-            .expect("connect to in-memory sqlite");
-        Migrator::fresh(&db).await.expect("apply migrations");
-        db
-    }
-
-    fn now() -> chrono::NaiveDateTime {
-        Utc::now().naive_utc()
-    }
-
-    async fn insert_guild(db: &DatabaseConnection, id: i64) {
-        guilds::ActiveModel {
-            id: Set(id),
-            is_safe: Set(true),
-            created_at: Set(now()),
-            updated_at: Set(now()),
-        }
-        .insert(db)
-        .await
-        .expect("insert guild");
-    }
+    use crate::domain::test_support::{fresh_db, insert_guild, now};
+    use crate::entities::{trophies, user_trophies};
 
     async fn insert_trophy(db: &DatabaseConnection, guild_id: i64, name: &str, value: i32) -> Uuid {
         let id = Uuid::now_v7();
