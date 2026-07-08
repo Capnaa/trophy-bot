@@ -14,6 +14,15 @@
 //!   fallback) with a documented fallback: a lookup that fails for any
 //!   reason other than "not a member" counts as present, so transient
 //!   errors never hide users.
+//!
+//! Lookup cost is BOUNDED (spec: "HTTP fallback per page (only 10
+//! lookups)"): the quit-user filter walks the board in rank order and stops
+//! as soon as the requested page is filled, never exceeding
+//! [`MEMBERSHIP_LOOKUP_BUDGET`] HTTP calls; name formats resolve only the
+//! displayed page (≤ [`PER_PAGE`] more). Users left unresolved default to
+//! [`Membership::Unknown`] and stay visible — on a board where everyone is
+//! still a member, a page-1 render (the panel updater's case) costs at most
+//! 10 lookups total.
 
 use std::collections::HashMap;
 
@@ -26,6 +35,14 @@ use crate::i18n::{self, LanguageIdentifier};
 
 /// Users per leaderboard page (legacy parity).
 pub const PER_PAGE: usize = 10;
+
+/// Hard upper bound on membership HTTP lookups spent filtering quit users
+/// in a single render. The filter walk stops early once the requested page
+/// is filled, so this cap only bites on boards where many top-ranked users
+/// have left; users beyond it stay unresolved ([`Membership::Unknown`],
+/// visible). Keeps `/leaderboard` and every panel refresh rate-limit-safe
+/// even on production-size guilds.
+pub const MEMBERSHIP_LOOKUP_BUDGET: usize = 50;
 
 /// Resolved membership of a leaderboard user in the guild (F16).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +149,41 @@ pub struct BoardView {
     pub last: usize,
 }
 
+/// The board rows that survive the quit-user filter, in rank order. Users
+/// missing from `membership` are treated as [`Membership::Unknown`] and
+/// stay visible.
+fn visible_users<'a>(
+    board: &'a [(i64, i64)],
+    membership: &HashMap<i64, Membership>,
+    hide_quit_users: bool,
+) -> Vec<&'a (i64, i64)> {
+    board
+        .iter()
+        .filter(|(user_id, _)| {
+            !hide_quit_users || membership.get(user_id) != Some(&Membership::Absent)
+        })
+        .collect()
+}
+
+/// The user ids that will actually be displayed for `requested_page`, after
+/// filtering and clamping — at most [`PER_PAGE`] of them. Used to bound the
+/// member-data lookups for name formats 1-3 to the displayed page only.
+pub(crate) fn page_slice_ids(
+    board: &[(i64, i64)],
+    membership: &HashMap<i64, Membership>,
+    hide_quit_users: bool,
+    requested_page: i64,
+) -> Vec<i64> {
+    let visible = visible_users(board, membership, hide_quit_users);
+    let bounds = clamp_page(requested_page, visible.len());
+    visible
+        .iter()
+        .skip((bounds.page - 1) * PER_PAGE)
+        .take(PER_PAGE)
+        .map(|(user_id, _)| *user_id)
+        .collect()
+}
+
 /// Pure view builder: filters, paginates (clamping first — F14), ranks and
 /// formats. `board` is the full `(user_id, score)` list from
 /// [`queries::leaderboard`], already sorted by score descending.
@@ -146,12 +198,7 @@ pub fn build_view(
 ) -> BoardView {
     let total_score: i64 = board.iter().map(|(_, score)| score).sum();
 
-    let visible: Vec<&(i64, i64)> = board
-        .iter()
-        .filter(|(user_id, _)| {
-            !hide_quit_users || membership.get(user_id) != Some(&Membership::Absent)
-        })
-        .collect();
+    let visible = visible_users(board, membership, hide_quit_users);
 
     let bounds = clamp_page(requested_page, visible.len());
     let start = (bounds.page - 1) * PER_PAGE;
@@ -240,46 +287,104 @@ fn is_unknown_member(error: &serenity::Error) -> bool {
     }
 }
 
-/// Resolves membership for a set of users: Serenity checks the cache first
-/// and falls back to one HTTP fetch per cache miss. 404 → [`Membership::
-/// Absent`]; any other failure → [`Membership::Unknown`] (logged, F16).
-pub async fn resolve_membership(
+/// A stored user id as a Discord snowflake, or `None` when it cannot be one
+/// (zero or negative — such a user can never be a member).
+fn snowflake(user_id: i64) -> Option<serenity::UserId> {
+    u64::try_from(user_id)
+        .ok()
+        .filter(|id| *id != 0)
+        .map(serenity::UserId::new)
+}
+
+/// Resolves ONE user's membership: Serenity checks the cache first and
+/// falls back to a single HTTP fetch. 404 → [`Membership::Absent`]; any
+/// other failure → [`Membership::Unknown`] (logged, F16).
+pub async fn lookup_membership(
     cache_http: &impl serenity::CacheHttp,
     guild_id: serenity::GuildId,
-    user_ids: impl IntoIterator<Item = i64>,
-) -> HashMap<i64, Membership> {
+    user_id: i64,
+) -> Membership {
+    let Some(id) = snowflake(user_id) else {
+        return Membership::Absent;
+    };
+    match guild_id.member(cache_http, id).await {
+        Ok(member) => Membership::Present {
+            username: member.user.name.to_string(),
+            nickname: member.nick.as_ref().map(|nick| nick.to_string()),
+            tag: member.user.tag(),
+        },
+        Err(error) if is_unknown_member(&error) => Membership::Absent,
+        Err(error) => {
+            log::warn!(
+                "Member lookup failed (guild={guild_id}, user={user_id}), keeping visible: {error}"
+            );
+            Membership::Unknown
+        }
+    }
+}
+
+/// Bounded membership walk for the quit-user filter: resolves `ids` in
+/// order, stopping as soon as `needed_visible` non-absent users are
+/// confirmed OR `budget` lookups have been spent. Users never reached stay
+/// out of the map — [`build_view`] treats them as [`Membership::Unknown`]
+/// (visible), so exhausting the budget can only ever SHOW a departed user,
+/// never hide a present one. Invalid snowflakes are marked absent for free.
+pub(crate) async fn resolve_until_visible<R, Fut>(
+    ids: impl IntoIterator<Item = i64>,
+    needed_visible: usize,
+    budget: usize,
+    mut resolve: R,
+) -> HashMap<i64, Membership>
+where
+    R: FnMut(i64) -> Fut,
+    Fut: std::future::Future<Output = Membership>,
+{
     let mut resolved = HashMap::new();
-    for user_id in user_ids {
+    let mut visible = 0usize;
+    let mut lookups = 0usize;
+    for user_id in ids {
+        if visible >= needed_visible {
+            break;
+        }
         if resolved.contains_key(&user_id) {
             continue;
         }
-        let Some(id) = u64::try_from(user_id).ok().filter(|id| *id != 0) else {
-            // Not a valid snowflake — cannot be a member.
-            resolved.insert(user_id, Membership::Absent);
-            continue;
-        };
-        let membership = match guild_id.member(cache_http, serenity::UserId::new(id)).await {
-            Ok(member) => Membership::Present {
-                username: member.user.name.to_string(),
-                nickname: member.nick.as_ref().map(|nick| nick.to_string()),
-                tag: member.user.tag(),
-            },
-            Err(error) if is_unknown_member(&error) => Membership::Absent,
-            Err(error) => {
-                log::warn!(
-                    "Member lookup failed (guild={guild_id}, user={user_id}), keeping visible: {error}"
+        let membership = if snowflake(user_id).is_none() {
+            // Not a valid snowflake — cannot be a member; no lookup spent.
+            Membership::Absent
+        } else {
+            if lookups >= budget {
+                log::debug!(
+                    "Membership lookup budget ({budget}) exhausted after {visible} visible users; \
+                     remaining board users stay visible"
                 );
-                Membership::Unknown
+                break;
             }
+            lookups += 1;
+            resolve(user_id).await
         };
+        if membership != Membership::Absent {
+            visible += 1;
+        }
         resolved.insert(user_id, membership);
     }
     resolved
 }
 
+/// How many visible users must be confirmed to render `requested_page`: a
+/// full page's worth up to that page, clamped by the (unfiltered) board
+/// length — filtering can only shrink the real last page below this bound.
+pub(crate) fn needed_visible(requested_page: i64, board_len: usize) -> usize {
+    let max_last = board_len.div_ceil(PER_PAGE).max(1);
+    let page = requested_page.clamp(1, max_last as i64) as usize;
+    (page * PER_PAGE).min(board_len)
+}
+
 /// End-to-end render: queries the board and settings, resolves only the
-/// memberships actually needed, and returns the finished embed. Both
-/// `/leaderboard` and the panel updater go through here (shared path, F13).
+/// memberships actually needed — bounded to [`MEMBERSHIP_LOOKUP_BUDGET`]
+/// filter lookups plus at most [`PER_PAGE`] name lookups — and returns the
+/// finished embed. Both `/leaderboard` and the panel updater go through
+/// here (shared path, F13).
 pub async fn render_leaderboard(
     db: &impl ConnectionTrait,
     cache_http: &impl serenity::CacheHttp,
@@ -296,24 +401,33 @@ pub async fn render_leaderboard(
     let hide_quit_users = effective.hide_quit_users == 0;
     let format = LeaderboardFormat::from_setting(effective.leaderboard_format);
 
-    // Only resolve the memberships the view actually needs: every user when
-    // quit users must be filtered out, just the displayed page when a
-    // non-mention name format needs member data, none otherwise.
-    let ids_to_resolve: Vec<i64> = if hide_quit_users {
-        board.iter().map(|(user_id, _)| *user_id).collect()
-    } else if format != LeaderboardFormat::Mention {
-        let bounds = clamp_page(requested_page, board.len());
-        board
-            .iter()
-            .skip((bounds.page - 1) * PER_PAGE)
-            .take(PER_PAGE)
-            .map(|(user_id, _)| *user_id)
-            .collect()
+    // Quit-user filter: walk the board in rank order, stopping once the
+    // requested page can be filled — 10 lookups on a healthy board — and
+    // never spending more than the hard budget (unresolved users default
+    // to Unknown = visible).
+    let mut membership = if hide_quit_users {
+        let ids: Vec<i64> = board.iter().map(|entry| entry.0).collect();
+        resolve_until_visible(
+            ids,
+            needed_visible(requested_page, board.len()),
+            MEMBERSHIP_LOOKUP_BUDGET,
+            |user_id| lookup_membership(cache_http, guild_id, user_id),
+        )
+        .await
     } else {
-        Vec::new()
+        HashMap::new()
     };
 
-    let membership = resolve_membership(cache_http, guild_id, ids_to_resolve).await;
+    // Name formats 1-3 need member data for the displayed page only (≤ 10
+    // extra lookups); anything still unresolved renders as a mention (F13).
+    if format != LeaderboardFormat::Mention {
+        for user_id in page_slice_ids(&board, &membership, hide_quit_users, requested_page) {
+            if !membership.contains_key(&user_id) {
+                let resolved = lookup_membership(cache_http, guild_id, user_id).await;
+                membership.insert(user_id, resolved);
+            }
+        }
+    }
     let view = build_view(
         locale,
         &board,
@@ -431,6 +545,102 @@ mod tests {
             assert_eq!(display_name(format, 42, &Membership::Absent), "<@42>");
             assert_eq!(display_name(format, 42, &Membership::Unknown), "<@42>");
         }
+    }
+
+    // --- bounded membership resolution (no unbounded per-user HTTP) ---
+
+    fn ready(membership: Membership) -> std::future::Ready<Membership> {
+        std::future::ready(membership)
+    }
+
+    #[tokio::test]
+    async fn filter_walk_stops_once_the_requested_page_is_filled() {
+        // 100-user board, page 1, everyone still a member: exactly 10
+        // lookups (spec target: "HTTP fallback per page (only 10 lookups)").
+        let ids: Vec<i64> = (1..=100).collect();
+        let calls = std::cell::Cell::new(0usize);
+        let map = resolve_until_visible(ids.iter().copied(), 10, MEMBERSHIP_LOOKUP_BUDGET, |_| {
+            calls.set(calls.get() + 1);
+            ready(present("u", None, "u#0"))
+        })
+        .await;
+        assert_eq!(calls.get(), 10);
+        assert_eq!(map.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn departed_users_extend_the_walk_only_up_to_the_hard_budget() {
+        // Pathological board where everyone left: the page can never fill,
+        // so the hard budget stops the walk; the rest stay unresolved
+        // (Unknown → visible), never triggering more HTTP.
+        let ids: Vec<i64> = (1..=10_000).collect();
+        let calls = std::cell::Cell::new(0usize);
+        let map = resolve_until_visible(ids.iter().copied(), 10, MEMBERSHIP_LOOKUP_BUDGET, |_| {
+            calls.set(calls.get() + 1);
+            ready(Membership::Absent)
+        })
+        .await;
+        assert_eq!(calls.get(), MEMBERSHIP_LOOKUP_BUDGET);
+        assert_eq!(map.len(), MEMBERSHIP_LOOKUP_BUDGET);
+        assert!(!map.contains_key(&((MEMBERSHIP_LOOKUP_BUDGET as i64) + 1)));
+    }
+
+    #[tokio::test]
+    async fn filter_walk_counts_only_visible_users_toward_the_page() {
+        // Alternating absent/present: confirming 5 visible users takes 10
+        // lookups, and absent users are correctly recorded along the way.
+        let ids: Vec<i64> = (1..=100).collect();
+        let calls = std::cell::Cell::new(0usize);
+        let map = resolve_until_visible(ids.iter().copied(), 5, MEMBERSHIP_LOOKUP_BUDGET, |id| {
+            calls.set(calls.get() + 1);
+            ready(if id % 2 == 1 {
+                Membership::Absent
+            } else {
+                Membership::Unknown
+            })
+        })
+        .await;
+        assert_eq!(calls.get(), 10);
+        assert_eq!(map.get(&1), Some(&Membership::Absent));
+        assert_eq!(map.get(&10), Some(&Membership::Unknown));
+        assert!(!map.contains_key(&11));
+    }
+
+    #[tokio::test]
+    async fn invalid_snowflakes_are_absent_without_spending_budget() {
+        let calls = std::cell::Cell::new(0usize);
+        let map = resolve_until_visible([0, -5, 7], 10, MEMBERSHIP_LOOKUP_BUDGET, |id| {
+            calls.set(calls.get() + 1);
+            assert_eq!(id, 7, "only the real snowflake reaches the resolver");
+            ready(present("u", None, "u#0"))
+        })
+        .await;
+        assert_eq!(calls.get(), 1);
+        assert_eq!(map.get(&0), Some(&Membership::Absent));
+        assert_eq!(map.get(&-5), Some(&Membership::Absent));
+    }
+
+    #[test]
+    fn needed_visible_covers_the_clamped_requested_page() {
+        assert_eq!(needed_visible(1, 100), 10);
+        assert_eq!(needed_visible(3, 100), 30);
+        assert_eq!(needed_visible(-2, 100), 10, "bad pages clamp to page 1");
+        assert_eq!(needed_visible(999, 25), 25, "page clamps to 3, capped by board length");
+        assert_eq!(needed_visible(1, 0), 0);
+        assert_eq!(needed_visible(1, 7), 7);
+    }
+
+    #[test]
+    fn page_slice_ids_follow_filtering_and_clamping() {
+        let board: Vec<(i64, i64)> = (1..=12).map(|i| (i, 50 - i)).collect();
+        let membership = HashMap::from([(1, Membership::Absent)]);
+        // Hiding quit users: visible = 2..=12 (11 users), page 2 = [12].
+        assert_eq!(page_slice_ids(&board, &membership, true, 2), vec![12]);
+        // Showing quit users: page 2 = [11, 12].
+        assert_eq!(page_slice_ids(&board, &membership, false, 2), vec![11, 12]);
+        // Out-of-range pages clamp (F14) before slicing.
+        assert_eq!(page_slice_ids(&board, &HashMap::new(), false, 999), vec![11, 12]);
+        assert_eq!(page_slice_ids(&board, &HashMap::new(), false, -1).len(), PER_PAGE);
     }
 
     // --- build_view ---
