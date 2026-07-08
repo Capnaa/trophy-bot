@@ -23,6 +23,10 @@ Documentation for the Rust rewrite of Trophy Bot. All content here is validated 
 | [specs/i18n.md](specs/i18n.md) | Localization: Fluent catalogs, locale resolution from the interaction, rules for command code |
 | [specs/implementation-plan.md](specs/implementation-plan.md) | Ordered code-migration plan: phases, command implementation order C0–C17 with their F-fixes, local validation gates |
 
+## Runbooks
+
+- [runbooks/first-data-migration.md](runbooks/first-data-migration.md) — Operator guide for the one-shot legacy data migration: prerequisites, commands per environment (local / Docker / PostgreSQL), report review checklist, re-run rules.
+
 ## Reviews
 
 - [reviews/2026-07-08-ultracode-migration-review.md](reviews/2026-07-08-ultracode-migration-review.md) — Final migration-review verdict: feature equivalence vs the Node.js bot, findings disposition (43 raised / 38 confirmed / 5 refuted), and residual risks before cutover.

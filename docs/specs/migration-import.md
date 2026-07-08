@@ -1,5 +1,7 @@
 # Spec: Legacy data import
 
+> Operator step-by-step guide (first-time execution, per environment): [../runbooks/first-data-migration.md](../runbooks/first-data-migration.md).
+
 How production data moves from `json.sqlite` (quick.db JSON blobs, see `docs/specs/data-model-legacy.md`) into the normalized SeaORM schema (`docs/specs/schema.md`). Runs as the dedicated CLI subcommand defined in ADR 0008. Depends on ADR 0004 (UUIDv7), ADR 0005 (name uniqueness + Unicode-aware dedupe), ADR 0006 (no stored score). All expected counts below were measured against the real production snapshot.
 
 ## Principles
