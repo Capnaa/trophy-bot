@@ -15,6 +15,19 @@ pub struct DefaultedField {
     pub field: &'static str,
 }
 
+/// One trophy field whose legacy value was PRESENT but unusable (non-numeric
+/// snowflake, out-of-range timestamp, ...); imported as NULL / synthetic
+/// default instead. Defense path — 0 expected in production (spec principle 3:
+/// anomalies are reported, never silently fixed).
+#[derive(Debug, Clone, Serialize)]
+pub struct InvalidFieldValue {
+    pub guild_id: i64,
+    pub legacy_id: String,
+    pub field: &'static str,
+    /// The unusable legacy value, verbatim.
+    pub value: String,
+}
+
 /// One non-integer legacy trophy value rounded half-away-from-zero.
 #[derive(Debug, Clone, Serialize)]
 pub struct RoundedValue {
@@ -113,6 +126,7 @@ pub struct ImportReport {
     // Phase 3
     pub trophies: u64,
     pub defaulted_fields: Vec<DefaultedField>,
+    pub invalid_fields: Vec<InvalidFieldValue>,
     pub rounded_values: Vec<RoundedValue>,
     pub renamed_trophies: Vec<RenamedTrophy>,
     // Phase 4
@@ -157,6 +171,7 @@ impl ImportReport {
             ("tombstoned_guilds", self.tombstoned_guilds.len() as u64, 5),
             ("corrupt_guilds", self.corrupt_guilds.len() as u64, 0),
             ("trophies", self.trophies, 10_853),
+            ("invalid_field_values", self.invalid_fields.len() as u64, 0),
             ("rounded_values", self.rounded_values.len() as u64, 44),
             ("renamed_trophies", self.renamed_trophies.len() as u64, 643),
             ("awards_inserted", self.awards_inserted, 60_554),

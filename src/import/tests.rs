@@ -10,8 +10,8 @@ use crate::entities::{
 use crate::legacy::{LegacyBot, LegacyData};
 use crate::migrations::Migrator;
 use sea_orm::{
-    ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait, PaginatorTrait,
-    QueryFilter,
+    ActiveModelTrait, ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
+    NotSet, PaginatorTrait, QueryFilter, Set,
 };
 use sea_orm_migration::MigratorTrait;
 use std::collections::HashMap;
@@ -21,8 +21,9 @@ use std::time::Duration;
 /// Synthetic legacy `guilds` document exercising every phase rule:
 /// - guild `100`: renames (two "test"), float rounding (8.5, -2.5), orphan
 ///   award ("99"), duplicate award elements, reward dedupe, panel, partial
-///   settings, dedications, incomplete trophy (`2`), score drift (user 502)
-///   and rounding-induced mismatch (user 500).
+///   settings, dedications (user+name on `3`, text-only on `4`, absent on
+///   `1`), incomplete trophy (`2`), score drift (user 502) and
+///   rounding-induced mismatch (user 500).
 /// - guild `300`: `imsafe` absent, empty settings (no row expected).
 /// - `200`: `/forgetme` tombstone; `999`: corrupt non-object value.
 const FIXTURE: &str = r#"{
@@ -30,12 +31,15 @@ const FIXTURE: &str = r#"{
     "imsafe": true,
     "settings": {"hide_quit_users": 1, "leaderboard_format": 3},
     "trophies": {
-      "current": 4,
+      "current": 5,
       "1": {"name": "test", "value": 10, "creator": "55", "created": 1600000000000,
             "signed": true, "details": "the details", "description": "a desc", "emoji": "🥇"},
       "2": {"name": "test", "value": 8.5},
       "3": {"name": "Unique", "value": -2.5, "creator": "55", "created": 1600000000000,
-            "signed": false, "details": "d", "dedication": {"user": "42", "name": "someone"}}
+            "signed": false, "details": "d", "dedication": {"user": "42", "name": "someone"}},
+      "4": {"name": "Texty", "value": 1, "creator": "55", "created": 1600000000000,
+            "signed": false, "details": "d", "description": "d", "emoji": "🏆",
+            "dedication": {"user": null, "name": "For the fans"}}
     },
     "users": {
       "500": {"trophies": ["1", "1", "2", "99"], "trophyValue": 28.5},
@@ -344,6 +348,126 @@ async fn incomplete_trophies_get_defaults_and_are_reported() {
     assert_eq!(complete.dedication_text, None);
 }
 
+/// Third documented legacy dedication shape (`data-model-legacy.md`, 496 in
+/// production): `{"user": null, "name": "free text"}` → text only, no user.
+#[tokio::test]
+async fn text_only_dedication_sets_text_without_user() {
+    let (db, report) = import_fixture().await;
+
+    let texty = trophy(&db, 100, "4").await;
+    assert_eq!(texty.dedication_user_id, None, "text-only dedication has no user id");
+    assert_eq!(texty.dedication_text.as_deref(), Some("For the fans"));
+    // A normal shape, not an anomaly: nothing reported for this trophy.
+    assert!(report.defaulted_fields.iter().all(|d| d.legacy_id != "4"));
+    assert!(report.invalid_fields.is_empty());
+}
+
+/// Defense paths (spec principle 3): present-but-unusable `creator`,
+/// `created` and `dedication.user` are NULLed/defaulted AND reported,
+/// exactly like the orphan-award defense. Production has 0 of these.
+#[tokio::test]
+async fn invalid_present_field_values_are_nulled_and_reported() {
+    // `created` is i64::MAX ms — rejected by chrono's from_timestamp_millis.
+    let fixture = r#"{
+      "600": {
+        "trophies": {
+          "current": 1,
+          "1": {"name": "Odd", "value": 1, "creator": "not-a-snowflake",
+                "created": 9223372036854775807, "signed": false, "details": "d",
+                "description": "d", "emoji": "🏆",
+                "dedication": {"user": "someone", "name": "text"}}
+        },
+        "users": {}
+      }
+    }"#;
+    let db = fresh_db().await;
+    let report =
+        import_data(&db, &legacy_from_json(fixture), &opts_no_images()).await.expect("import");
+
+    let odd = trophy(&db, 600, "1").await;
+    assert_eq!(odd.creator_user_id, None, "non-numeric creator → NULL");
+    assert_eq!(odd.dedication_user_id, None, "non-numeric dedication user → NULL");
+    assert_eq!(odd.dedication_text.as_deref(), Some("text"), "dedication text still kept");
+
+    let invalid: HashMap<&str, &str> = report
+        .invalid_fields
+        .iter()
+        .map(|f| {
+            assert_eq!((f.guild_id, f.legacy_id.as_str()), (600, "1"));
+            (f.field, f.value.as_str())
+        })
+        .collect();
+    assert_eq!(invalid.len(), 3);
+    assert_eq!(invalid.get("creator"), Some(&"not-a-snowflake"));
+    assert_eq!(invalid.get("created"), Some(&"9223372036854775807"));
+    assert_eq!(invalid.get("dedication.user"), Some(&"someone"));
+    // Invalid values are not double-reported as absent-field defaults.
+    assert!(report.defaulted_fields.is_empty());
+}
+
+/// The emptiness check must also cover `bot_stats` — the one imported table
+/// not FK-anchored to `guilds` — so a target that ran with zero guilds gets
+/// the clear refusal instead of a mid-transaction UNIQUE(bot_stats.name)
+/// failure.
+#[tokio::test]
+async fn refuses_when_only_bot_stats_rows_exist() {
+    let db = fresh_db().await;
+    let now = chrono::Utc::now().naive_utc();
+    bot_stats::ActiveModel {
+        id: NotSet,
+        name: Set("total".to_owned()),
+        total: Set(1),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(&db)
+    .await
+    .expect("seed a bot_stats row");
+
+    let err = import_data(&db, &legacy_from_json("{}"), &opts_no_images())
+        .await
+        .expect_err("must refuse a target with bot_stats rows");
+    assert!(err.to_string().contains("refusing to import"), "clear refusal expected: {err:#}");
+
+    let count = bot_stats::Entity::find().count(&db).await.expect("count bot_stats");
+    assert_eq!(count, 1, "the refused run must not touch existing rows");
+}
+
+/// All-or-nothing (spec principle 2): a failure in the LAST insert phase
+/// (guild_settings CHECK, leaderboard_format 9 > 3) must roll back every
+/// earlier insert — bot_stats, guilds, trophies, awards, rewards and panels.
+#[tokio::test]
+async fn failed_insert_rolls_back_all_prior_phases() {
+    let fixture = r#"{
+      "100": {
+        "imsafe": true,
+        "settings": {"leaderboard_format": 9},
+        "trophies": {
+          "current": 1,
+          "1": {"name": "T", "value": 10, "creator": "55", "created": 1600000000000,
+                "signed": false, "details": "d"}
+        },
+        "users": {"500": {"trophies": ["1"], "trophyValue": 10}},
+        "rewards": [{"role": "700", "requirement": 5}],
+        "panel": {"message": "900", "channel": "901"}
+      }
+    }"#;
+    let db = fresh_db().await;
+    let err = import_data(&db, &legacy_from_json(fixture), &opts_no_images())
+        .await
+        .expect_err("out-of-range setting must fail the import");
+    assert!(err.to_string().contains("guild_settings"), "failure is the settings insert: {err:#}");
+
+    // Every phase that inserted before the failure was rolled back.
+    assert_eq!(bot_stats::Entity::find().count(&db).await.unwrap(), 0, "bot_stats rolled back");
+    assert_eq!(guilds::Entity::find().count(&db).await.unwrap(), 0, "guilds rolled back");
+    assert_eq!(trophies::Entity::find().count(&db).await.unwrap(), 0, "trophies rolled back");
+    assert_eq!(user_trophies::Entity::find().count(&db).await.unwrap(), 0, "awards rolled back");
+    assert_eq!(role_rewards::Entity::find().count(&db).await.unwrap(), 0, "rewards rolled back");
+    assert_eq!(leaderboard_panels::Entity::find().count(&db).await.unwrap(), 0, "panels rolled back");
+    assert_eq!(guild_settings::Entity::find().count(&db).await.unwrap(), 0, "settings rolled back");
+}
+
 #[tokio::test]
 async fn score_mismatches_classified_as_rounding_or_legacy_drift() {
     let (_db, report) = import_fixture().await;
@@ -444,6 +568,79 @@ async fn images_local_kept_missing_nulled_urls_expired_orphans_listed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Minimal local HTTP server: answers every connection with `200 OK` + `body`.
+async fn serve_images(listener: tokio::net::TcpListener, body: &'static [u8]) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    while let Ok((mut sock, _)) = listener.accept().await {
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await; // request headers; content ignored
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(body).await;
+            let _ = sock.shutdown().await;
+        });
+    }
+}
+
+/// Phase 6 success path: a live CDN URL is downloaded to the images dir as
+/// `{guild}_{legacy_id}.{ext}`, the trophy stores that filename, and the
+/// download is reported.
+#[tokio::test]
+async fn url_images_downloaded_saved_and_reported() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind local server");
+    let port = listener.local_addr().expect("local addr").port();
+    tokio::spawn(serve_images(listener, b"GIFDATA"));
+
+    let dir = temp_images_dir("download");
+    let fixture = format!(
+        r#"{{
+          "400": {{
+            "trophies": {{
+              "current": 1,
+              "1": {{"name": "Remote", "value": 1, "creator": "1", "created": 1, "signed": false,
+                    "details": "d", "image": "http://127.0.0.1:{port}/pic.gif?ex=deadbeef"}}
+            }},
+            "users": {{}}
+          }}
+        }}"#
+    );
+    let db = fresh_db().await;
+    let opts = ImportOptions {
+        images_dir: dir.clone(),
+        http_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
+    let report = import_data(&db, &legacy_from_json(&fixture), &opts).await.expect("import");
+
+    assert_eq!(trophy(&db, 400, "1").await.image.as_deref(), Some("400_1.gif"));
+    assert_eq!(
+        std::fs::read(dir.join("400_1.gif")).expect("downloaded file exists"),
+        b"GIFDATA",
+        "downloaded bytes written to the images dir"
+    );
+
+    assert_eq!(report.downloaded_images.len(), 1);
+    let downloaded = &report.downloaded_images[0];
+    assert_eq!(
+        (downloaded.guild_id, downloaded.legacy_id.as_str(), downloaded.filename.as_str()),
+        (400, "1", "400_1.gif")
+    );
+    assert!(downloaded.url.starts_with("http://127.0.0.1:"));
+    assert!(report.expired_image_urls.is_empty());
+    assert_eq!(report.url_images(), 1);
+    assert!(
+        report.orphan_disk_files.is_empty(),
+        "the downloaded file is referenced, not an orphan: {:?}",
+        report.orphan_disk_files
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn report_serializes_to_json_with_summary() {
     let (_db, report) = import_fixture().await;
@@ -455,6 +652,7 @@ async fn report_serializes_to_json_with_summary() {
         "corrupt_guilds",
         "trophies",
         "defaulted_fields",
+        "invalid_fields",
         "rounded_values",
         "renamed_trophies",
         "awards_inserted",

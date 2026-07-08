@@ -125,15 +125,25 @@ pub async fn import_data(
 }
 
 /// Idempotent-by-rerun (spec principle 4): never merge into existing data.
+///
+/// Checks `guilds` AND `bot_stats`: every other imported table hangs off
+/// `guilds` via FKs, but `bot_stats` is independent — a target that ran the
+/// bot with zero guilds would otherwise pass here and then die mid-transaction
+/// on `UNIQUE(bot_stats.name)` with a confusing DB error.
 async fn ensure_empty_target(db: &DatabaseConnection) -> Result<()> {
-    let existing = guilds::Entity::find()
+    let guild_rows = guilds::Entity::find()
         .count(db)
         .await
         .context("checking that the target `guilds` table is empty")?;
-    if existing > 0 {
+    let bot_stat_rows = bot_stats::Entity::find()
+        .count(db)
+        .await
+        .context("checking that the target `bot_stats` table is empty")?;
+    if guild_rows > 0 || bot_stat_rows > 0 {
         bail!(
-            "target database already contains {existing} guild(s); \
-             refusing to import into a non-empty target (run `trophy-bot fresh` first)"
+            "target database already contains data ({guild_rows} guild row(s), \
+             {bot_stat_rows} bot_stats row(s)); refusing to import into a \
+             non-empty target (run `trophy-bot fresh` first)"
         );
     }
     Ok(())
@@ -315,6 +325,23 @@ fn note_default(report: &mut ImportReport, guild_id: i64, legacy_id: &str, field
     });
 }
 
+/// Records a field that was PRESENT in legacy but unusable (spec principle 3:
+/// never silently fix). Defense only — production has 0 such values.
+fn note_invalid(
+    report: &mut ImportReport,
+    guild_id: i64,
+    legacy_id: &str,
+    field: &'static str,
+    value: impl Into<String>,
+) {
+    report.invalid_fields.push(InvalidFieldValue {
+        guild_id,
+        legacy_id: legacy_id.to_owned(),
+        field,
+        value: value.into(),
+    });
+}
+
 fn prepare_trophy(
     guild_id: i64,
     legacy_id: &str,
@@ -324,7 +351,14 @@ fn prepare_trophy(
     report: &mut ImportReport,
 ) -> PreparedTrophy {
     let creator_user_id = match t.creator.as_deref() {
-        Some(creator) => creator.parse::<i64>().ok(),
+        // Non-numeric snowflake → NULL, but reported (defense; 0 in prod).
+        Some(creator) => match creator.parse::<i64>() {
+            Ok(id) => Some(id),
+            Err(_) => {
+                note_invalid(report, guild_id, legacy_id, "creator", creator);
+                None
+            }
+        },
         None => {
             note_default(report, guild_id, legacy_id, "creator");
             None
@@ -332,9 +366,14 @@ fn prepare_trophy(
     };
     // Legacy `created` is Unix MILLISECONDS; missing → synthetic import time.
     let created_at = match t.created {
-        Some(ms) => chrono::DateTime::from_timestamp_millis(ms)
-            .map(|dt| dt.naive_utc())
-            .unwrap_or(now),
+        Some(ms) => match chrono::DateTime::from_timestamp_millis(ms) {
+            Some(dt) => dt.naive_utc(),
+            // Out of chrono's range → synthetic import time, reported.
+            None => {
+                note_invalid(report, guild_id, legacy_id, "created", ms.to_string());
+                now
+            }
+        },
         None => {
             note_default(report, guild_id, legacy_id, "created");
             now
@@ -385,12 +424,17 @@ fn prepare_trophy(
     let normalized_name = normalize_name(&name);
 
     // Dedication: empty/null shapes → NULLs; text-only → text; user → both.
-    let dedication_user_id = t
-        .dedication
-        .user
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse::<i64>().ok());
+    // A present, non-empty, non-numeric user is NULLed but reported (defense).
+    let dedication_user_id = match t.dedication.user.as_deref().filter(|s| !s.is_empty()) {
+        Some(user) => match user.parse::<i64>() {
+            Ok(id) => Some(id),
+            Err(_) => {
+                note_invalid(report, guild_id, legacy_id, "dedication.user", user);
+                None
+            }
+        },
+        None => None,
+    };
     let dedication_text = t.dedication.name.clone().filter(|s| !s.is_empty());
 
     let image_source = t.image.as_deref().filter(|s| !s.is_empty()).map(|s| {
