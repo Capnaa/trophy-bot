@@ -30,6 +30,7 @@ Documentation for the Rust rewrite of Trophy Bot. All content here is validated 
 ## Reviews
 
 - [reviews/2026-07-08-ultracode-migration-review.md](reviews/2026-07-08-ultracode-migration-review.md) — Final migration-review verdict: feature equivalence vs the Node.js bot, findings disposition (43 raised / 38 confirmed / 5 refuted), and residual risks before cutover.
+- [reviews/2026-07-08-ultracode-ponytail-audit.md](reviews/2026-07-08-ultracode-ponytail-audit.md) — Whole-repo over-engineering audit: ranked delete/simplify/replace-with-stdlib list (29 raised / 28 confirmed), net -288 lines / -0 deps possible.
 
 ## Conventions
 
