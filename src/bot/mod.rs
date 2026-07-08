@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod images;
 pub mod render;
+pub mod resolver;
 pub mod util;
 
 use anyhow::Result;
