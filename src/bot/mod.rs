@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod images;
 pub mod render;
 pub mod util;
 

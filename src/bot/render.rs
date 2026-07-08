@@ -253,13 +253,12 @@ pub async fn resolve_membership(
         if resolved.contains_key(&user_id) {
             continue;
         }
-        let Ok(id) = u64::try_from(user_id) else {
+        let Some(id) = u64::try_from(user_id).ok().filter(|id| *id != 0) else {
             // Not a valid snowflake — cannot be a member.
             resolved.insert(user_id, Membership::Absent);
             continue;
         };
-        let membership = match guild_id.member(cache_http, serenity::UserId::new(id.max(1))).await
-        {
+        let membership = match guild_id.member(cache_http, serenity::UserId::new(id)).await {
             Ok(member) => Membership::Present {
                 username: member.user.name.to_string(),
                 nickname: member.nick.as_ref().map(|nick| nick.to_string()),
