@@ -272,6 +272,25 @@ async fn resolve_dedication(ctx: &Context<'_>, raw: &str) -> (Option<i64>, Optio
     }
 }
 
+/// Temp name a replacement image is downloaded under before the DB update.
+/// Derived from the final `{guild_id}_{trophy_uuid}.{ext}` name, so it never
+/// collides with any stored filename (stored names never end in `.tmp`).
+pub(crate) fn temp_filename(filename: &str) -> String {
+    format!("{filename}.tmp")
+}
+
+/// Promotes a downloaded temp image over its final filename once the DB
+/// update went through. Best-effort: past the commit an error can only be
+/// logged — the trophy then keeps serving the previous same-named file (or
+/// none), which beats having clobbered it before the update.
+pub(crate) fn promote_image(temp: &str, dest: &str) {
+    let dir = std::path::Path::new(images::IMAGES_DIR);
+    if let Err(err) = std::fs::rename(dir.join(temp), dir.join(dest)) {
+        log::error!("failed to promote trophy image {temp} -> {dest}: {err}");
+        images::remove(temp);
+    }
+}
+
 /// Edit an existing trophy for your server.
 #[allow(clippy::too_many_arguments)]
 #[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD")]
@@ -347,13 +366,12 @@ pub async fn edit(
 
     // Renaming must re-check per-guild uniqueness, excluding this trophy.
     let new_normalized = name.as_deref().map(normalize_name);
-    if let Some(normalized) = &new_normalized {
-        if *normalized != current.normalized_name
-            && rename_collides(db, guild_id, current.id, normalized).await?
-        {
-            let err = CreateError::DuplicateName { name: name.clone().unwrap_or_default() };
-            return util::reply_error(ctx, err.message(&locale), true).await;
-        }
+    if let Some(normalized) = &new_normalized
+        && *normalized != current.normalized_name
+        && rename_collides(db, guild_id, current.id, normalized).await?
+    {
+        let err = CreateError::DuplicateName { name: name.clone().unwrap_or_default() };
+        return util::reply_error(ctx, err.message(&locale), true).await;
     }
 
     let dedication_pair = match dedication.as_deref() {
@@ -379,47 +397,51 @@ pub async fn edit(
 
     // Download (slow path) only after every check passed; defer so a large
     // attachment can't time out the interaction. The DB stores the local
-    // filename, never the CDN URL (F6).
+    // filename, never the CDN URL (F6). The bytes land under a temp name and
+    // are only promoted over the final filename AFTER the DB update succeeds:
+    // a same-extension replacement reuses the stored filename, and writing it
+    // in place before the update would irrecoverably clobber the old image if
+    // the update then failed.
     let old_image = current.image.clone();
     let new_image = plan.image.clone().filter(|_| image_plan.is_some());
-    if let Some((url, _)) = &image_plan {
+    let temp_image = new_image.as_deref().map(temp_filename);
+    if let (Some((url, _)), Some(temp)) = (&image_plan, &temp_image) {
         ctx.defer().await?;
-        let filename = new_image.as_deref().expect("image plan implies a filename");
-        if let Err(err) = images::download(url, filename).await {
+        if let Err(err) = images::download(url, temp).await {
             log::warn!("/edit image download failed (guild={guild_id}): {err:#}");
             return util::reply_error(ctx, i18n::t(&locale, "create-error-image-download"), true)
                 .await;
         }
     }
 
-    /// Best-effort cleanup of a freshly downloaded file when the edit did not
-    /// go through (skipped if it overwrote the previous file in place).
-    fn cleanup(new_image: &Option<String>, old_image: &Option<String>) {
-        if let Some(filename) = new_image {
-            if old_image.as_deref() != Some(filename.as_str()) {
-                images::remove(filename);
-            }
-        }
-    }
-
     let updated = match apply_edit(db, current, &plan).await {
         Ok(Ok(model)) => model,
         Ok(Err(err)) => {
-            cleanup(&new_image, &old_image);
+            // The temp file never shadows a stored filename: dropping it
+            // leaves the previous image fully intact.
+            if let Some(temp) = &temp_image {
+                images::remove(temp);
+            }
             return util::reply_error(ctx, err.message(&locale), true).await;
         }
         Err(err) => {
-            cleanup(&new_image, &old_image);
+            if let Some(temp) = &temp_image {
+                images::remove(temp);
+            }
             return Err(err);
         }
     };
 
+    if let (Some(temp), Some(new)) = (&temp_image, &new_image) {
+        promote_image(temp, new);
+    }
+
     // The previous image file is orphaned once replaced by one with a
     // different name (extension changed or legacy-named file).
-    if let (Some(new), Some(old)) = (&new_image, &old_image) {
-        if new != old {
-            images::remove(old);
-        }
+    if let (Some(new), Some(old)) = (&new_image, &old_image)
+        && new != old
+    {
+        images::remove(old);
     }
 
     let embed = serenity::CreateEmbed::new()
@@ -437,7 +459,6 @@ pub async fn edit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::{ActiveModelTrait, EntityTrait};
 
     use crate::domain::test_support::{fresh_db, insert_guild, now};
     use crate::entities::guilds;
@@ -732,6 +753,49 @@ mod tests {
         let updated = apply_edit(&db, current, &plan).await.unwrap().unwrap();
         assert_eq!(updated.name, "Gold Medal");
         assert_eq!(updated.normalized_name, "goldmedal");
+    }
+
+    // --- temp image promotion ---
+
+    #[test]
+    fn temp_filename_appends_tmp_and_never_matches_a_stored_name() {
+        let stored = images::filename(1, Uuid::now_v7(), "png");
+        let temp = temp_filename(&stored);
+        assert_eq!(temp, format!("{stored}.tmp"));
+        assert_ne!(temp, stored);
+    }
+
+    #[test]
+    fn promote_image_replaces_the_final_file_only_on_promotion() {
+        let dir = std::path::Path::new(images::IMAGES_DIR);
+        std::fs::create_dir_all(dir).unwrap();
+        let dest = images::filename(1, Uuid::now_v7(), "png");
+        let temp = temp_filename(&dest);
+        std::fs::write(dir.join(&dest), b"old bytes").unwrap();
+        std::fs::write(dir.join(&temp), b"new bytes").unwrap();
+
+        // Until promotion the final file still holds the old bytes (the DB
+        // failure path only drops the temp and never touches the original).
+        assert_eq!(std::fs::read(dir.join(&dest)).unwrap(), b"old bytes");
+
+        promote_image(&temp, &dest);
+        assert_eq!(std::fs::read(dir.join(&dest)).unwrap(), b"new bytes");
+        assert!(!dir.join(&temp).exists(), "temp file is consumed");
+
+        images::remove(&dest);
+    }
+
+    #[test]
+    fn promote_image_with_missing_temp_leaves_the_final_file_alone() {
+        let dir = std::path::Path::new(images::IMAGES_DIR);
+        std::fs::create_dir_all(dir).unwrap();
+        let dest = images::filename(1, Uuid::now_v7(), "png");
+        std::fs::write(dir.join(&dest), b"old bytes").unwrap();
+
+        promote_image(&temp_filename(&dest), &dest);
+        assert_eq!(std::fs::read(dir.join(&dest)).unwrap(), b"old bytes");
+
+        images::remove(&dest);
     }
 
     // --- i18n catalog ---
