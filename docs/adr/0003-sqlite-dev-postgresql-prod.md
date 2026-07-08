@@ -10,7 +10,7 @@ Local development should not require running a database server. Production needs
 
 - Both backends enabled at compile time via SeaORM features `sqlx-sqlite` + `sqlx-postgres` (`runtime-tokio-rustls`).
 - The backend is selected at runtime by the `DATABASE_URL` scheme (`sqlite://...` vs `postgres://...`). No recompilation, no cargo feature switching.
-- Schema is defined exclusively through SeaORM's migration API (Rust), never raw SQL, so the same migration runs on both engines. The `migrations-sql-example/` folder is reference material only.
+- Schema is defined exclusively through SeaORM's migration API (Rust), never raw SQL, so the same migration runs on both engines.
 
 ## Consequences
 

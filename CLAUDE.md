@@ -18,7 +18,7 @@ Validated documentation lives in `docs/` (see `docs/README.md`):
 - `docs/specs/migration-import.md` — legacy → normalized DB import algorithm, validation report, cutover runbook.
 - `docs/adr/` — architecture decisions (Rust stack, normalized SeaORM schema, SQLite dev / PostgreSQL prod, UUIDv7 internal IDs, per-guild unique trophy names, computed scores, embedded migration CLI, graceful shutdown).
 
-The legacy JS (`commands/`, `events/`, `globals.js`, `index.js`) remains the reference for behavior questions the specs don't answer. Ignore `TrophyBot-Copy/` entirely (backup). `docs/archive/` holds superseded documents — never use them as a source.
+The legacy Node.js source was removed from the repo root after the migration; the full copy lives under `TrophyBot-Copy/` (reference only — the spec citations `file.js:line` map to its layout). `docs/archive/` holds superseded documents — never use them as a source.
 
 ## Rust development rules
 
@@ -34,8 +34,10 @@ The legacy JS (`commands/`, `events/`, `globals.js`, `index.js`) remains the ref
 - `cargo run -- up|down|status|fresh|refresh|reset` — embedded schema migrations (no external sea-orm-cli needed).
 - Database backend is selected at runtime by the `DATABASE_URL` scheme: `sqlite://` in development, `postgres://` in production.
 
-## Data files
+## Data files (git-excluded production data)
 
-- `json.sqlite` — legacy quick.db production snapshot; read-only input for the importer.
+- `json.sqlite` — legacy quick.db production snapshot; read-only input for `trophy-bot import`.
 - `bot_db.json` / `guilds_db.json` — the same two JSON blobs exported for inspection.
 - `images/` — trophy images named `{guild_id}_{legacy_trophy_id}.{ext}`; filenames are preserved as-is through the migration.
+
+These files are NOT in git and regular tests must NOT depend on them — only the importer uses them. Validations against the real snapshot are `#[ignore]` tests, run explicitly with `cargo test -- --ignored` on a machine holding the data.

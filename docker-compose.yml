@@ -1,14 +1,16 @@
-version: '3.8'
 services:
   trophybot:
     build: .
     container_name: trophybot
     restart: unless-stopped
+    env_file: .env
     environment:
-      - NODE_ENV=production
+      - DATABASE_URL=sqlite:///app/data/trophy.sqlite?mode=rwc
     volumes:
-      - ./json.sqlite:/app/json.sqlite
-      - ./example_db.json:/app/example_db.json
+      - ./data:/app/data
       - ./images:/app/images
-      - ./.env:/app/.env
-    tty: true
+      # Legacy quick.db snapshot, read-only — only needed for the one-shot
+      # data migration:  docker compose run --rm trophybot import --legacy-db /app/json.sqlite
+      - ./json.sqlite:/app/json.sqlite:ro
+    # Graceful shutdown window (bot closes shards on SIGTERM).
+    stop_grace_period: 30s

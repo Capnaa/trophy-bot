@@ -156,3 +156,9 @@ scratch-*.sqlite
 smoke.sqlite*
 import-report.json
 rdb.sqlite*
+
+# Local build config and OS noise
+.cargo/
+.DS_Store
+logs/
+data/

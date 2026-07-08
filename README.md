@@ -20,19 +20,46 @@ To get started, simply type `/help` in your server to see a few basic info.
 
 ## Features
 
-This bot includes the following features:
+* Create and customize trophies for your server (name, description, emoji, image, value).
+* Award trophies to users — with autocomplete, bulk awards, and a full audit of who awarded what.
+* Server leaderboard and auto-updating leaderboard panels.
+* Role rewards assigned automatically when users reach score thresholds.
+* Per-server settings (dedication display, role stacking, leaderboard format, and more).
+* Localized replies based on each user's Discord language (English shipped; more via Fluent catalogs).
 
-* Create and customize trophies for your server users.
-* Award different value trophies for your servers.
-* Set custom name, description, image, value, icon, etc. to your trophies
-* Look at a leaderboard of the trophies you have earned.
-* Customize role rewards for users when they reach certain scores.
-* Change special settings for your server on how the bot works.
-* Simple to use and easy to understand.
+## Tech
+
+Rewritten in **Rust** (Serenity + Poise + SeaORM) with a normalized database — SQLite for local development, PostgreSQL for production, selected by `DATABASE_URL`. The previous Node.js implementation was fully migrated: same commands and features, with its known bugs fixed. See [docs/](docs/README.md) for specs, architecture decisions and the migration plan.
+
+## Running
+
+```bash
+cp .env.example .env          # set DISCORD_TOKEN, DISCORD_BOT_ID, DATABASE_URL
+cargo run -- up               # apply database migrations
+cargo run                     # start the bot
+```
+
+Other CLI subcommands: `status` / `down` / `fresh` / `refresh` / `reset` (schema migrations), `import --legacy-db <file>` (one-shot legacy quick.db data migration), `smoke` (end-to-end flow against the test guild).
+
+### Docker
+
+```bash
+./dev.sh build && ./dev.sh up   # or: docker compose up -d
+./dev.sh migrate                # apply migrations inside the container
+./dev.sh logs
+```
+
+The bot shuts down gracefully on `docker stop` (SIGTERM).
+
+## Development
+
+* `cargo test` — full suite (no external services or production data needed).
+* `cargo test -- --ignored` — extra validations against a production data snapshot, if present.
+* Documentation index: [docs/README.md](docs/README.md). Contributions follow [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Support Server
 
-You can [join our support server](https://discord.gg/kNmgU44xgU) to get help and report issues:
+You can [join our support server](https://discord.gg/kNmgU44xgU) to get help and report issues.
 
 ## Contributing
 

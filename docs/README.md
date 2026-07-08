@@ -1,6 +1,6 @@
 # Trophy Bot documentation
 
-Documentation for the Rust rewrite of Trophy Bot. All content here is validated against the real Node.js source and production data — earlier scattered markdown docs were consolidated into this tree and archived under `docs/archive/`.
+Documentation for the Rust rewrite of Trophy Bot. All content here is validated against the real Node.js source and production data — earlier scattered markdown docs were consolidated into this tree and archived under `docs/archive/`. The legacy Node.js source was removed from the repo root after the migration; spec citations (`file.js:line`) map to the full copy kept under `TrophyBot-Copy/`.
 
 ## Structure
 

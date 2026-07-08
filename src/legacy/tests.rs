@@ -1,5 +1,9 @@
-//! Tests against the REAL production dumps (`bot_db.json`, `guilds_db.json`,
-//! `json.sqlite`). Expected counts come from `docs/specs/data-model-legacy.md`.
+//! Legacy loader tests. Fixture-based tests always run; tests marked
+//! `#[ignore]` validate against the REAL production dumps (`bot_db.json`,
+//! `guilds_db.json`, `json.sqlite`), which are git-excluded production data —
+//! run them explicitly with `cargo test -- --ignored` on a machine holding
+//! the snapshot (pre-cutover verification). Expected counts come from
+//! `docs/specs/data-model-legacy.md`.
 
 use super::*;
 use std::collections::HashMap;
@@ -15,6 +19,7 @@ fn load_guilds_dump() -> HashMap<String, GuildEntry> {
 }
 
 #[test]
+#[ignore = "requires the git-excluded production snapshot (bot_db.json)"]
 fn bot_dump_parses_with_expected_counters() {
     let raw = std::fs::read_to_string(repo_file("bot_db.json")).expect("read bot_db.json");
     let bot: LegacyBot = serde_json::from_str(&raw).expect("parse bot_db.json");
@@ -26,6 +31,7 @@ fn bot_dump_parses_with_expected_counters() {
 }
 
 #[test]
+#[ignore = "requires the git-excluded production snapshot (guilds_db.json)"]
 fn guilds_dump_root_entries_split_into_tombstones_and_guilds() {
     let guilds = load_guilds_dump();
 
@@ -37,6 +43,7 @@ fn guilds_dump_root_entries_split_into_tombstones_and_guilds() {
 }
 
 #[test]
+#[ignore = "requires the git-excluded production snapshot (guilds_db.json)"]
 fn guilds_dump_trophy_award_and_config_counts_match_spec() {
     let guilds = load_guilds_dump();
     let valid: Vec<&LegacyGuild> = guilds.values().filter_map(GuildEntry::as_guild).collect();
@@ -116,6 +123,7 @@ fn dedication_tolerates_all_four_legacy_shapes() {
 }
 
 #[test]
+#[ignore = "requires the git-excluded production snapshot (guilds_db.json)"]
 fn guilds_dump_float_imsafe_and_image_shape_counts_match_spec() {
     let guilds = load_guilds_dump();
     let valid: Vec<&LegacyGuild> = guilds.values().filter_map(GuildEntry::as_guild).collect();
@@ -231,6 +239,7 @@ fn legacy_connection_disables_sqlx_statement_logging() {
 }
 
 #[tokio::test]
+#[ignore = "requires the git-excluded production snapshot (json.sqlite)"]
 async fn loads_from_sqlite_with_matching_counts() {
     let path = repo_file("json.sqlite");
     let data = LegacyData::load(path.to_str().expect("utf-8 path"))

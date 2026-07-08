@@ -7,4 +7,5 @@ Key rules:
 - Run `cargo test` after every code change.
 - Use the `log` crate, never `println!`/`eprintln!`; keep `main` minimal and code modular.
 - Schema changes only via SeaORM migrations (`src/migrations/`), portable across SQLite (dev) and PostgreSQL (prod).
-- The legacy Node.js source (`commands/`, `events/`, `globals.js`) is behavioral reference; `TrophyBot-Copy/` and `docs/archive/` must be ignored.
+- The legacy Node.js source lives only under `TrophyBot-Copy/` (behavioral reference; spec citations map to its layout); `docs/archive/` must never be used as a source.
+- `json.sqlite`, `bot_db.json`, `guilds_db.json` and `images/` are git-excluded production data: only the importer uses them; regular tests must not depend on them (`cargo test -- --ignored` for snapshot validations).
