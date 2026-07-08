@@ -15,12 +15,12 @@ The contract for the rewrite: the Rust bot ships with **exactly the same command
 |---|---|---|
 | `/about` `/help` `/invite` `/ping` `/stats` `/suggest` `/support` | ✅ same | `/help` content rewritten (drops deprecated permissions lesson) |
 | `/imsafe` | ✅ kept as no-op confirmation | Gate itself retired (Discord native permissions); command replies "already safe" for continuity |
-| `/forgetme` | ✅ same UX (owner + confirm button) | Now actually deletes (cascade) instead of tombstone |
-| `/create` `/edit` `/delete` `/award` `/revoke` `/clear` `/details` | ✅ same parameters | Fix catalog §3 applies |
+| `/forgetme` | ✅ same UX (owner + confirm button, plus Cancel; buttons expire — §4.8) | Now actually deletes (cascade) instead of tombstone |
+| `/create` `/edit` `/delete` `/award` `/revoke` `/clear` `/details` | ✅ same parameters | Fix catalog §3 applies; `/delete` adds a confirmation step (§4.9) |
 | `/export` | ✅ same | Exports normalized data as JSON |
 | `/panel create/delete` | ✅ same | Better refresh model (§3.4) |
 | `/permissions add/list/remove` | ✅ kept at cutover | Same static deprecation notice; candidate for removal in a later release |
-| `/rewards add/remove/clear/list` | ✅ same | Role application finally works (§3.1) |
+| `/rewards add/remove/clear/list` | ✅ same (remove: string + autocomplete — §4.10) | Role application finally works (§3.1) |
 | `/settings set/list` | ✅ same 5 settings, same defaults | Value input via proper Discord choices |
 | `/leaderboard` `/show` `/trophies user/guild` | ✅ same | Fix catalog §3 applies |
 | `/language`, `/trophystats` | ❌ not reimplemented | Dead files, never functional |
@@ -110,6 +110,9 @@ Users may notice these; everything else must feel identical.
 5. **The 150-trophies-per-guild limit is kept at cutover** for parity, but is now a config value, not a technical ceiling (ADR 0002).
 6. **`/imsafe` gate retired**: management commands rely on Discord permissions only.
 7. **Ephemeral where it was always intended** (§2) — some replies that used to be public become private.
+8. **`/forgetme` confirmation buttons expire 60 seconds after issuance** — the legacy `forgetmeproceed` button stayed live forever; the Rust flow encodes the issue timestamp in the button custom ids (`src/bot/buttons.rs::CONFIRM_TIMEOUT_SECS`) and a stale press swaps the warning for an "expired" notice and strips the buttons, requiring `/forgetme` to be re-run. Deliberate safety improvement for an irreversible action; the window is announced in the warning embed itself, and being stateless it also survives restarts (commands-utility.md §/forgetme Rust target).
+9. **`/delete` asks for confirmation** — legacy /delete hard-deleted the trophy (and, via cascade semantics, every award of it) on a single un-confirmed command. The Rust flow first shows a warning embed stating how many awards the deletion will remove, with Confirm/Cancel buttons that only the invoker can press; the deletion (plus image cleanup and reward recompute) runs on confirm from `src/bot/buttons.rs`. Like the /forgetme buttons, the pair is stateless and expires 60 seconds after issuance (`src/bot/buttons.rs::CONFIRM_TIMEOUT_SECS`), announced in the warning itself. This implements the spec's Rust target (commands-trophy-management.md §/delete, "Add a confirmation button for destructive delete").
+10. **`/rewards remove` takes a string option with autocomplete instead of the legacy `Role` option** — required by F24: Discord's native role picker cannot select roles that no longer exist, so rewards pointing at deleted roles would be stuck forever. The option offers autocomplete over the configured rewards (label = live role name, or the id marked deleted; sent value = the stored role id) and also accepts a pasted role mention or raw id. Same validation and hierarchy checks as before.
 
 ## 5. Scalability & maintainability requirements
 

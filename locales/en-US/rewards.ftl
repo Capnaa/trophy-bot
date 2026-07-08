@@ -17,7 +17,11 @@ rewards-error-hierarchy = You can't manage a reward for { $role } because that r
 rewards-remove-success = ✅ { $role } is no longer a role reward.
 rewards-remove-footer = Members who already have this role will keep it; the bot only updates roles when a user's score changes.
 rewards-remove-error-not-a-reward = { $role } is not a role reward in this server.
-rewards-remove-error-invalid-role = That doesn't look like a role. Use a role mention or a raw role ID.
+rewards-remove-error-invalid-role = That doesn't look like a role. Pick one from the autocomplete suggestions, or use a role mention or a raw role ID.
+
+## /rewards remove autocomplete choice labels (the sent value is the role ID)
+rewards-remove-choice = { $name } (requires { $requirement })
+rewards-remove-choice-deleted = { $id } — deleted role (requires { $requirement })
 
 ## Shared empty state (remove/clear on a server without rewards)
 rewards-error-no-rewards = This server has no role rewards.

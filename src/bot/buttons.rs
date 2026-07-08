@@ -1,12 +1,23 @@
 //! Component-interaction (button) handling, wired into poise through
 //! `FrameworkOptions::event_handler` (see `src/bot/mod.rs`).
 //!
-//! The only component flow today is the `/forgetme` confirmation (batch C16,
-//! F33). The flow is **stateless**: the issue timestamp is encoded in each
-//! button's custom id (`forgetme:confirm:{unix}` / `forgetme:cancel:{unix}`),
-//! and a press more than [`CONFIRM_TIMEOUT_SECS`] after issuance is rejected
-//! — the message loses its buttons and shows an "expired" notice instead of
-//! acting. No in-memory state survives a restart or is needed at all.
+//! Two confirmation flows live here: `/forgetme` (batch C16, F33) and the
+//! destructive `/delete` (spec Rust target, rust-parity-plan §4). Both are
+//! **stateless**: everything a press needs is encoded in the button's custom
+//! id (`forgetme:{action}:{unix}` / `trophy-delete:{action}:{unix}:{invoker}:
+//! {trophy_uuid}`), and a press more than [`CONFIRM_TIMEOUT_SECS`] after
+//! issuance is rejected — the message loses its buttons and shows an
+//! "expired" notice instead of acting. No in-memory state survives a restart
+//! or is needed at all. Legacy buttons never expired (and legacy /delete had
+//! no confirmation at all); both are intentional, documented deltas
+//! (rust-parity-plan.md §4) announced in the warning embeds themselves.
+//!
+//! Every press is acknowledged (`CreateInteractionResponse::Acknowledge`,
+//! i.e. `DEFERRED_UPDATE_MESSAGE`) **before** any slow work — the owner
+//! lookup can hit HTTP on a cache miss and the purge transaction can wait on
+//! the SQLite writer — so the 3-second component-ack deadline can never be
+//! breached ("no hanging interactions"). Later replies are therefore
+//! `edit_response` (rewrites the button message) or ephemeral followups.
 //!
 //! Every error path here is handled inline (logged + best-effort ephemeral
 //! reply): the handler always returns `Ok` so the framework's generic error
@@ -16,12 +27,14 @@ use poise::serenity_prelude as serenity;
 use sea_orm::{
     ColumnTrait, EntityTrait, QueryFilter, QuerySelect, TransactionSession, TransactionTrait,
 };
+use uuid::Uuid;
 
-use crate::bot::{images, util, Data, Error};
+use crate::bot::commands::delete;
+use crate::bot::{images, reward_apply, util, Data, Error};
 use crate::entities::{guilds, trophies};
 use crate::i18n;
 
-/// How long the /forgetme confirmation buttons stay valid.
+/// How long the /forgetme and /delete confirmation buttons stay valid.
 pub(crate) const CONFIRM_TIMEOUT_SECS: i64 = 60;
 
 /// Custom-id namespace for /forgetme buttons.
@@ -61,6 +74,127 @@ pub(crate) fn parse_custom_id(id: &str) -> Option<(ForgetmeButton, i64)> {
 /// (both unix seconds).
 pub(crate) fn is_expired(issued_at: i64, now: i64) -> bool {
     now.saturating_sub(issued_at) > CONFIRM_TIMEOUT_SECS
+}
+
+/// What a /forgetme button press must result in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PressOutcome {
+    /// Presser is not the guild owner: ephemeral rejection, message untouched.
+    RejectNotOwner,
+    /// Confirmation is stale: disarm the message with an "expired" notice.
+    Expired,
+    /// Cancel pressed in time: replace the warning with a cancelled notice.
+    Cancelled,
+    /// Confirm pressed in time: purge everything and leave.
+    Purge,
+}
+
+/// Pure decision for a /forgetme button press. Gate order matters: the owner
+/// gate wins over expiry (non-owners never learn the message state), and the
+/// expiry gate wins over both buttons.
+pub(crate) fn press_outcome(
+    button: ForgetmeButton,
+    is_owner: bool,
+    issued_at: i64,
+    now: i64,
+) -> PressOutcome {
+    if !is_owner {
+        return PressOutcome::RejectNotOwner;
+    }
+    if is_expired(issued_at, now) {
+        return PressOutcome::Expired;
+    }
+    match button {
+        ForgetmeButton::Cancel => PressOutcome::Cancelled,
+        ForgetmeButton::Confirm => PressOutcome::Purge,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /delete confirmation flow (spec Rust target: "Add a confirmation button
+// for destructive delete"; delta documented in rust-parity-plan.md §4)
+// ---------------------------------------------------------------------------
+
+/// Custom-id namespace for /delete confirmation buttons.
+const DELETE_PREFIX: &str = "trophy-delete";
+
+/// The two buttons of the /delete confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeleteButton {
+    Confirm,
+    Cancel,
+}
+
+/// Builds the custom id for a /delete button:
+/// `trophy-delete:{confirm|cancel}:{issued_at}:{invoker_id}:{trophy_uuid}`.
+/// Everything a press needs is in the id (stateless, restart-safe); at 90
+/// characters worst case it stays under Discord's 100-char custom-id cap.
+pub(crate) fn delete_custom_id(
+    button: DeleteButton,
+    issued_at: i64,
+    invoker_id: u64,
+    trophy_id: Uuid,
+) -> String {
+    let action = match button {
+        DeleteButton::Confirm => "confirm",
+        DeleteButton::Cancel => "cancel",
+    };
+    format!("{DELETE_PREFIX}:{action}:{issued_at}:{invoker_id}:{trophy_id}")
+}
+
+/// Parses a component custom id back into a /delete button press. Returns
+/// `None` for anything that is not exactly ours.
+pub(crate) fn parse_delete_custom_id(id: &str) -> Option<(DeleteButton, i64, u64, Uuid)> {
+    let rest = id.strip_prefix(DELETE_PREFIX)?.strip_prefix(':')?;
+    let (action, rest) = rest.split_once(':')?;
+    let button = match action {
+        "confirm" => DeleteButton::Confirm,
+        "cancel" => DeleteButton::Cancel,
+        _ => return None,
+    };
+    let (issued_at, rest) = rest.split_once(':')?;
+    let (invoker_id, trophy_id) = rest.split_once(':')?;
+    Some((
+        button,
+        issued_at.parse().ok()?,
+        invoker_id.parse().ok()?,
+        Uuid::parse_str(trophy_id).ok()?,
+    ))
+}
+
+/// What a /delete button press must result in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeletePressOutcome {
+    /// Presser is not the /delete invoker: ephemeral rejection, message kept.
+    RejectNotInvoker,
+    /// Confirmation is stale: disarm the message with an "expired" notice.
+    Expired,
+    /// Cancel pressed in time: replace the warning with a cancelled notice.
+    Cancelled,
+    /// Confirm pressed in time: hard-delete the trophy.
+    Delete,
+}
+
+/// Pure decision for a /delete button press. Mirrors the /forgetme gate
+/// order: the invoker gate wins over expiry (the confirmation is public, so
+/// anyone in the channel can press — only the invoker may decide), and the
+/// expiry gate wins over both buttons.
+pub(crate) fn delete_press_outcome(
+    button: DeleteButton,
+    is_invoker: bool,
+    issued_at: i64,
+    now: i64,
+) -> DeletePressOutcome {
+    if !is_invoker {
+        return DeletePressOutcome::RejectNotInvoker;
+    }
+    if is_expired(issued_at, now) {
+        return DeletePressOutcome::Expired;
+    }
+    match button {
+        DeleteButton::Cancel => DeletePressOutcome::Cancelled,
+        DeleteButton::Confirm => DeletePressOutcome::Delete,
+    }
 }
 
 /// Deletes ALL data of `guild_id` in one transaction and returns the image
@@ -103,30 +237,184 @@ pub async fn handle_event(
     else {
         return Ok(());
     };
-    let Some((button, issued_at)) = parse_custom_id(&component.data.custom_id) else {
+
+    let result = if let Some((button, issued_at)) = parse_custom_id(&component.data.custom_id) {
+        ("forgetme", handle_forgetme(ctx, component, data, button, issued_at).await)
+    } else if let Some((button, issued_at, invoker_id, trophy_id)) =
+        parse_delete_custom_id(&component.data.custom_id)
+    {
+        (
+            "delete",
+            handle_trophy_delete(ctx, component, data, button, issued_at, invoker_id, trophy_id)
+                .await,
+        )
+    } else {
         return Ok(()); // not one of ours
     };
 
-    if let Err(err) = handle_forgetme(ctx, component, data, button, issued_at).await {
+    if let (flow, Err(err)) = result {
         let guild = component.guild_id.map(|g| g.get());
         let user = component.user.id.get();
-        log::error!("forgetme button failed (guild={guild:?}, user={user}): {err:#}");
+        log::error!("{flow} button failed (guild={guild:?}, user={user}): {err:#}");
         let locale = i18n::resolve(Some(&component.locale));
-        let reply = ephemeral_embed(error_embed(
+        // The interaction was acknowledged first thing in the handler, so
+        // errors are delivered as an ephemeral followup. If the ack itself
+        // was what failed, this fails too and is only logged.
+        let reply = ephemeral_followup(error_embed(
             &locale,
             i18n::t(&locale, "common-error-generic"),
         ));
-        if let Err(reply_err) = component.create_response(&ctx.http, reply).await {
+        if let Err(reply_err) = component.create_followup(&ctx.http, reply).await {
             log::error!(
-                "failed to deliver forgetme error reply (guild={guild:?}, user={user}): {reply_err}"
+                "failed to deliver {flow} error reply (guild={guild:?}, user={user}): {reply_err}"
             );
         }
     }
     Ok(())
 }
 
-/// The /forgetme confirmation flow: owner gate → expiry gate → cancel or
-/// confirm (purge DB, respond, remove images, leave the guild).
+/// The /delete confirmation flow: ack → invoker gate → expiry gate → cancel
+/// or confirm (hard-delete the trophy, rewrite the message, remove its image,
+/// recompute reward roles for every user that held it).
+async fn handle_trophy_delete(
+    ctx: &serenity::Context,
+    component: &serenity::ComponentInteraction,
+    data: &Data,
+    button: DeleteButton,
+    issued_at: i64,
+    invoker_id: u64,
+    trophy_id: Uuid,
+) -> anyhow::Result<()> {
+    let locale = i18n::resolve(Some(&component.locale));
+    let Some(guild_id) = component.guild_id else {
+        return Ok(()); // guild message components can't fire outside a guild
+    };
+
+    // Acknowledge FIRST (deferred update, no loading state): the delete
+    // transaction can wait on the SQLite writer, so responding only
+    // afterwards risks blowing the 3-second component-ack deadline (same
+    // rationale as /forgetme).
+    component
+        .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
+        .await?;
+
+    let outcome = delete_press_outcome(
+        button,
+        component.user.id.get() == invoker_id,
+        issued_at,
+        chrono::Utc::now().timestamp(),
+    );
+    match outcome {
+        DeletePressOutcome::RejectNotInvoker => {
+            let reply =
+                ephemeral_followup(error_embed(&locale, i18n::t(&locale, "delete-not-invoker")));
+            component.create_followup(&ctx.http, reply).await?;
+        }
+        DeletePressOutcome::Expired => {
+            let embed = serenity::CreateEmbed::new()
+                .title(i18n::t(&locale, "delete-expired-title"))
+                .description(i18n::t(&locale, "delete-expired"))
+                .colour(util::COLOR_ERROR);
+            component
+                .edit_response(&ctx.http, replace_message(embed))
+                .await?;
+        }
+        DeletePressOutcome::Cancelled => {
+            let embed = serenity::CreateEmbed::new()
+                .title(i18n::t(&locale, "delete-cancelled-title"))
+                .description(i18n::t(&locale, "delete-cancelled"))
+                .colour(util::COLOR_MAIN);
+            component
+                .edit_response(&ctx.http, replace_message(embed))
+                .await?;
+        }
+        DeletePressOutcome::Delete => {
+            // Re-load the trophy scoped to THIS guild: it may already be
+            // gone (another manager, a stale message) and a custom id can
+            // never delete across guilds.
+            let trophy = trophies::Entity::find_by_id(trophy_id)
+                .filter(trophies::Column::GuildId.eq(guild_id.get() as i64))
+                .one(&data.db)
+                .await?;
+            let Some(trophy) = trophy else {
+                let embed = serenity::CreateEmbed::new()
+                    .title(i18n::t(&locale, "delete-gone-title"))
+                    .description(i18n::t(&locale, "delete-gone"))
+                    .colour(util::COLOR_ERROR);
+                component
+                    .edit_response(&ctx.http, replace_message(embed))
+                    .await?;
+                return Ok(());
+            };
+
+            // 1. Hard delete (FK cascade wipes the awards) — F10 semantics,
+            //    shared with the old direct path.
+            let affected = delete::delete_trophy(&data.db, trophy.id).await?;
+
+            // 2. Rewrite the confirmation with the success embed. The delete
+            //    is committed, so a failed edit must NOT abort the flow:
+            //    image cleanup and reward recompute below run regardless.
+            let embed = serenity::CreateEmbed::new()
+                .colour(util::COLOR_SUCCESS)
+                .description(i18n::t_args(
+                    &locale,
+                    "delete-success",
+                    &[
+                        ("emoji", trophy.emoji.clone().into()),
+                        ("name", trophy.name.clone().into()),
+                    ],
+                ));
+            if let Err(err) = component
+                .edit_response(&ctx.http, replace_message(embed))
+                .await
+            {
+                log::error!(
+                    "delete: failed to acknowledge deletion of trophy {} (guild={}): {err}",
+                    trophy.id,
+                    guild_id.get()
+                );
+            }
+
+            // 3. F10: unlink the image only when the trophy actually has one
+            //    (`remove` logs failures instead of swallowing them).
+            if let Some(image) = &trophy.image {
+                images::remove(image).await;
+            }
+
+            // 4. §2 reward engine: awaited, idempotent, per-user failures
+            //    logged — an engine hiccup after the committed delete must
+            //    not stop the remaining users from recomputing.
+            let bot_id = ctx.cache.current_user().id;
+            for user_id in affected {
+                if let Err(err) = reward_apply::apply_rewards_via(
+                    &data.db,
+                    ctx,
+                    bot_id,
+                    None,
+                    guild_id,
+                    serenity::UserId::new(user_id as u64),
+                )
+                .await
+                {
+                    log::error!(
+                        "reward recompute failed after /delete (guild={}, user={user_id}): {err:#}",
+                        guild_id.get()
+                    );
+                }
+            }
+            log::info!(
+                "delete: trophy {} removed from guild {} on confirmation by invoker {}",
+                trophy.id,
+                guild_id.get(),
+                invoker_id
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The /forgetme confirmation flow: ack → owner gate → expiry gate → cancel
+/// or confirm (purge DB, rewrite the message, remove images, leave the guild).
 async fn handle_forgetme(
     ctx: &serenity::Context,
     component: &serenity::ComponentInteraction,
@@ -139,6 +427,15 @@ async fn handle_forgetme(
         return Ok(()); // guild message components can't fire outside a guild
     };
 
+    // Acknowledge FIRST (deferred update, no loading state): the owner lookup
+    // below can cost an HTTP round trip on a cache miss and the purge can
+    // wait on the SQLite writer (5s busy_timeout), so responding only
+    // afterwards risks blowing the 3-second component-ack deadline — the
+    // guild would be purged while the owner sees "This interaction failed".
+    component
+        .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
+        .await?;
+
     // Owner gate at press time too (anyone in the channel can see the button).
     // The cache guard is dropped within its own statement.
     let cached_owner = guild_id.to_guild_cached(&ctx.cache).map(|g| g.owner_id);
@@ -146,50 +443,55 @@ async fn handle_forgetme(
         Some(owner_id) => owner_id,
         None => ctx.http.get_guild(guild_id).await?.owner_id,
     };
-    if component.user.id != owner_id {
-        let reply = ephemeral_embed(error_embed(&locale, i18n::t(&locale, "forgetme-not-owner")));
-        component.create_response(&ctx.http, reply).await?;
-        return Ok(());
-    }
 
-    if is_expired(issued_at, chrono::Utc::now().timestamp()) {
-        // Disarm the stale message: swap the warning for an expired notice
-        // and drop the buttons.
-        let embed = serenity::CreateEmbed::new()
-            .title(i18n::t(&locale, "forgetme-expired-title"))
-            .description(i18n::t(&locale, "forgetme-expired"))
-            .colour(util::COLOR_ERROR);
-        component
-            .create_response(&ctx.http, update_message(embed))
-            .await?;
-        return Ok(());
-    }
-
-    match button {
-        ForgetmeButton::Cancel => {
+    let outcome = press_outcome(
+        button,
+        component.user.id == owner_id,
+        issued_at,
+        chrono::Utc::now().timestamp(),
+    );
+    match outcome {
+        PressOutcome::RejectNotOwner => {
+            let reply =
+                ephemeral_followup(error_embed(&locale, i18n::t(&locale, "forgetme-not-owner")));
+            component.create_followup(&ctx.http, reply).await?;
+        }
+        PressOutcome::Expired => {
+            // Disarm the stale message: swap the warning for an expired
+            // notice and drop the buttons.
+            let embed = serenity::CreateEmbed::new()
+                .title(i18n::t(&locale, "forgetme-expired-title"))
+                .description(i18n::t(&locale, "forgetme-expired"))
+                .colour(util::COLOR_ERROR);
+            component
+                .edit_response(&ctx.http, replace_message(embed))
+                .await?;
+        }
+        PressOutcome::Cancelled => {
             let embed = serenity::CreateEmbed::new()
                 .title(i18n::t(&locale, "forgetme-cancelled-title"))
                 .description(i18n::t(&locale, "forgetme-cancelled"))
                 .colour(util::COLOR_MAIN);
             component
-                .create_response(&ctx.http, update_message(embed))
+                .edit_response(&ctx.http, replace_message(embed))
                 .await?;
         }
-        ForgetmeButton::Confirm => {
+        PressOutcome::Purge => {
             // 1. True cascade delete inside one transaction. Errors propagate
-            //    (nothing was acknowledged yet, the caller answers the user).
+            //    (the interaction is already acknowledged; the caller answers
+            //    the user with an ephemeral followup, the buttons stay live).
             let image_files = purge_guild_data(&data.db, guild_id.get() as i64).await?;
 
-            // 2. Acknowledge BEFORE leaving the guild, replacing the warning
-            //    (and its buttons) with the goodbye. The data is already gone,
-            //    so a failed acknowledgement must NOT abort the flow: image
-            //    cleanup and the guild leave below run regardless.
+            // 2. Rewrite the message BEFORE leaving the guild, replacing the
+            //    warning (and its buttons) with the goodbye. The data is
+            //    already gone, so a failed edit must NOT abort the flow:
+            //    image cleanup and the guild leave below run regardless.
             let embed = serenity::CreateEmbed::new()
                 .title(i18n::t(&locale, "forgetme-goodbye-title"))
                 .description(i18n::t(&locale, "forgetme-goodbye"))
                 .colour(util::COLOR_MAIN);
             if let Err(err) = component
-                .create_response(&ctx.http, update_message(embed))
+                .edit_response(&ctx.http, replace_message(embed))
                 .await
             {
                 log::error!(
@@ -201,7 +503,7 @@ async fn handle_forgetme(
             // 3. Best-effort image cleanup; `images::remove` logs failures
             //    instead of swallowing them (fixes the legacy no-op unlink).
             for image in &image_files {
-                images::remove(image);
+                images::remove(image).await;
             }
 
             // 4. Leave. Data is already gone; a failed leave is only logged.
@@ -233,22 +535,20 @@ fn error_embed(
         .colour(util::COLOR_ERROR)
 }
 
-/// Ephemeral single-embed component response.
-fn ephemeral_embed(embed: serenity::CreateEmbed) -> serenity::CreateInteractionResponse {
-    serenity::CreateInteractionResponse::Message(
-        serenity::CreateInteractionResponseMessage::new()
-            .embed(embed)
-            .ephemeral(true),
-    )
+/// Ephemeral single-embed followup (the interaction is always acknowledged
+/// with a deferred update first, so plain responses are no longer possible).
+fn ephemeral_followup(embed: serenity::CreateEmbed) -> serenity::CreateInteractionResponseFollowup {
+    serenity::CreateInteractionResponseFollowup::new()
+        .embed(embed)
+        .ephemeral(true)
 }
 
-/// Replaces the button message with `embed` and strips all components.
-fn update_message(embed: serenity::CreateEmbed) -> serenity::CreateInteractionResponse {
-    serenity::CreateInteractionResponse::UpdateMessage(
-        serenity::CreateInteractionResponseMessage::new()
-            .embed(embed)
-            .components(vec![]),
-    )
+/// Edit that replaces the button message with `embed` and strips all
+/// components (follows the initial `Acknowledge` deferred update).
+fn replace_message(embed: serenity::CreateEmbed) -> serenity::EditInteractionResponse {
+    serenity::EditInteractionResponse::new()
+        .embed(embed)
+        .components(vec![])
 }
 
 #[cfg(test)]
@@ -299,6 +599,241 @@ mod tests {
             "press exactly at the deadline is still valid"
         );
         assert!(is_expired(issued, issued + CONFIRM_TIMEOUT_SECS + 1));
+    }
+
+    /// The button expiry is a deliberate divergence from legacy (whose
+    /// `forgetmeproceed` button stayed live forever) and MUST stay listed in
+    /// the intentional-deltas catalog with the actual timeout value. If this
+    /// test fails you changed the behavior (or the constant) without updating
+    /// docs/specs/rust-parity-plan.md §4.
+    #[test]
+    fn expiry_delta_is_documented_in_the_parity_plan() {
+        let plan = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/specs/rust-parity-plan.md"
+        ))
+        .expect("read rust-parity-plan.md");
+        let deltas = plan
+            .split("## 4.")
+            .nth(1)
+            .expect("parity plan has a §4 intentional-deltas section");
+        assert!(
+            deltas.contains("`/forgetme` confirmation buttons expire"),
+            "§4 must list the /forgetme button-expiry delta"
+        );
+        assert!(
+            deltas.contains(&format!("{CONFIRM_TIMEOUT_SECS} seconds")),
+            "§4 must state the current timeout ({CONFIRM_TIMEOUT_SECS} seconds)"
+        );
+    }
+
+    // --- press_outcome ---
+
+    #[test]
+    fn non_owner_is_rejected_before_anything_else() {
+        // Even an expired press must not reveal message state to non-owners.
+        for button in [ForgetmeButton::Confirm, ForgetmeButton::Cancel] {
+            for now in [1_000, 1_000 + CONFIRM_TIMEOUT_SECS + 1] {
+                assert_eq!(
+                    press_outcome(button, false, 1_000, now),
+                    PressOutcome::RejectNotOwner
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_owner_press_expires_regardless_of_button() {
+        let now = 1_000 + CONFIRM_TIMEOUT_SECS + 1;
+        for button in [ForgetmeButton::Confirm, ForgetmeButton::Cancel] {
+            assert_eq!(
+                press_outcome(button, true, 1_000, now),
+                PressOutcome::Expired
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_owner_press_maps_confirm_to_purge_and_cancel_to_cancelled() {
+        assert_eq!(
+            press_outcome(ForgetmeButton::Confirm, true, 1_000, 1_000 + CONFIRM_TIMEOUT_SECS),
+            PressOutcome::Purge
+        );
+        assert_eq!(
+            press_outcome(ForgetmeButton::Cancel, true, 1_000, 1_000),
+            PressOutcome::Cancelled
+        );
+    }
+
+    /// Regression guard for the interaction-timeout fix: `handle_forgetme`
+    /// must acknowledge the component interaction BEFORE the (potentially
+    /// slow) HTTP owner fetch and the purge transaction, so a >3s purge can
+    /// never leave the owner with "This interaction failed" on an already
+    /// purged guild. Serenity types aren't mockable here, so this checks the
+    /// statement order in the source itself.
+    #[test]
+    fn handler_acknowledges_before_owner_fetch_and_purge() {
+        let src = include_str!("buttons.rs");
+        let handler = src
+            .split("async fn handle_forgetme")
+            .nth(1)
+            .expect("handle_forgetme exists");
+        let ack = handler
+            .find("CreateInteractionResponse::Acknowledge")
+            .expect("handler must acknowledge the interaction");
+        let owner_fetch = handler
+            .find("get_guild(guild_id)")
+            .expect("handler fetches the owner on cache miss");
+        let purge = handler
+            .find("purge_guild_data(&data.db")
+            .expect("handler purges on confirm");
+        assert!(
+            ack < owner_fetch && ack < purge,
+            "the interaction must be acknowledged before the owner fetch \
+             ({ack} vs {owner_fetch}) and before the purge ({ack} vs {purge})"
+        );
+    }
+
+    // --- /delete confirmation flow ---
+
+    #[test]
+    fn delete_custom_id_round_trips_both_buttons() {
+        let trophy = Uuid::now_v7();
+        for button in [DeleteButton::Confirm, DeleteButton::Cancel] {
+            let id = delete_custom_id(button, 1_751_900_000, 42, trophy);
+            assert!(id.len() <= 100, "custom id must fit Discord's cap: {id}");
+            assert_eq!(
+                parse_delete_custom_id(&id),
+                Some((button, 1_751_900_000, 42, trophy))
+            );
+        }
+    }
+
+    #[test]
+    fn delete_parse_rejects_foreign_and_malformed_ids() {
+        let trophy = Uuid::now_v7();
+        let ids = [
+            String::new(),
+            "trophy-delete".to_string(),
+            "trophy-delete:".to_string(),
+            "trophy-delete:confirm".to_string(),
+            "trophy-delete:confirm:123".to_string(),
+            "trophy-delete:confirm:123:42".to_string(),
+            "trophy-delete:confirm:123:42:not-a-uuid".to_string(),
+            format!("trophy-delete:nuke:123:42:{trophy}"),
+            format!("trophy-delete:confirm:abc:42:{trophy}"),
+            format!("trophy-delete:confirm:123:abc:{trophy}"),
+            format!("other:confirm:123:42:{trophy}"),
+            "forgetme:confirm:123".to_string(), // the sibling flow must NOT match
+        ];
+        for id in &ids {
+            assert_eq!(parse_delete_custom_id(id), None, "id {id:?} must not parse");
+        }
+        // And the forgetme parser must not eat delete ids either.
+        let delete_id = delete_custom_id(DeleteButton::Confirm, 123, 42, trophy);
+        assert_eq!(parse_custom_id(&delete_id), None);
+    }
+
+    #[test]
+    fn delete_non_invoker_is_rejected_before_anything_else() {
+        for button in [DeleteButton::Confirm, DeleteButton::Cancel] {
+            for now in [1_000, 1_000 + CONFIRM_TIMEOUT_SECS + 1] {
+                assert_eq!(
+                    delete_press_outcome(button, false, 1_000, now),
+                    DeletePressOutcome::RejectNotInvoker
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn delete_stale_invoker_press_expires_regardless_of_button() {
+        let now = 1_000 + CONFIRM_TIMEOUT_SECS + 1;
+        for button in [DeleteButton::Confirm, DeleteButton::Cancel] {
+            assert_eq!(
+                delete_press_outcome(button, true, 1_000, now),
+                DeletePressOutcome::Expired
+            );
+        }
+    }
+
+    #[test]
+    fn delete_fresh_invoker_press_maps_confirm_and_cancel() {
+        assert_eq!(
+            delete_press_outcome(DeleteButton::Confirm, true, 1_000, 1_000 + CONFIRM_TIMEOUT_SECS),
+            DeletePressOutcome::Delete
+        );
+        assert_eq!(
+            delete_press_outcome(DeleteButton::Cancel, true, 1_000, 1_000),
+            DeletePressOutcome::Cancelled
+        );
+    }
+
+    /// Same regression guard as the /forgetme one: the /delete press handler
+    /// must acknowledge the component interaction BEFORE the trophy lookup
+    /// and the delete transaction.
+    #[test]
+    fn delete_handler_acknowledges_before_lookup_and_delete() {
+        let src = include_str!("buttons.rs");
+        let handler = src
+            .split("async fn handle_trophy_delete")
+            .nth(1)
+            .expect("handle_trophy_delete exists");
+        let ack = handler
+            .find("CreateInteractionResponse::Acknowledge")
+            .expect("handler must acknowledge the interaction");
+        let lookup = handler
+            .find("trophies::Entity::find_by_id")
+            .expect("handler re-loads the trophy");
+        let delete = handler
+            .find("delete::delete_trophy(")
+            .expect("handler deletes on confirm");
+        assert!(
+            ack < lookup && ack < delete,
+            "the interaction must be acknowledged before the trophy lookup \
+             ({ack} vs {lookup}) and before the delete ({ack} vs {delete})"
+        );
+    }
+
+    /// The /delete confirmation (legacy had none) is a user-visible delta
+    /// and MUST stay listed in the intentional-deltas catalog, including the
+    /// expiry window. If this fails you changed the flow (or the constant)
+    /// without updating docs/specs/rust-parity-plan.md §4.
+    #[test]
+    fn delete_confirmation_delta_is_documented_in_the_parity_plan() {
+        let plan = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/specs/rust-parity-plan.md"
+        ))
+        .expect("read rust-parity-plan.md");
+        let deltas = plan
+            .split("## 4.")
+            .nth(1)
+            .expect("parity plan has a §4 intentional-deltas section");
+        assert!(
+            deltas.contains("`/delete` asks for confirmation"),
+            "§4 must list the /delete confirmation delta"
+        );
+        assert!(
+            deltas.contains(&format!("{CONFIRM_TIMEOUT_SECS} seconds")),
+            "§4 must state the current timeout ({CONFIRM_TIMEOUT_SECS} seconds)"
+        );
+    }
+
+    #[test]
+    fn delete_flow_catalog_messages_exist() {
+        let locale = i18n::resolve(None);
+        for key in [
+            "delete-not-invoker",
+            "delete-cancelled-title",
+            "delete-cancelled",
+            "delete-expired-title",
+            "delete-expired",
+            "delete-gone-title",
+            "delete-gone",
+        ] {
+            assert_ne!(i18n::t(&locale, key), key, "missing Fluent key {key}");
+        }
     }
 
     // --- purge_guild_data ---

@@ -12,7 +12,7 @@ use crate::bot::{Context, Error, util};
 use crate::i18n;
 
 /// Confirms you're using Discord permissions instead of the deprecated custom permissions
-#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD")]
+#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD", required_permissions = "MANAGE_GUILD")]
 pub async fn imsafe(ctx: Context<'_>) -> Result<(), Error> {
     let locale = util::locale(&ctx);
 

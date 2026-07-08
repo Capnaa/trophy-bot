@@ -36,6 +36,7 @@ use crate::i18n;
     slash_command,
     guild_only,
     default_member_permissions = "MANAGE_GUILD",
+    required_permissions = "MANAGE_GUILD",
     subcommands("create", "delete"),
     subcommand_required
 )]
@@ -48,9 +49,7 @@ pub async fn panel(_ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, guild_only)]
 async fn create(ctx: Context<'_>) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("guild_only command invoked outside a guild"))?;
+    let guild_id = util::require_guild_id(&ctx)?;
     let db = &ctx.data().db;
 
     // The first render can exceed the 3 s interaction window (member
@@ -117,9 +116,7 @@ async fn create(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, guild_only)]
 async fn delete(ctx: Context<'_>) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("guild_only command invoked outside a guild"))?;
+    let guild_id = util::require_guild_id(&ctx)?;
     let db = &ctx.data().db;
 
     let Some(panel) = panel_updater::get_panel(db, guild_id.get() as i64).await? else {

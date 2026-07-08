@@ -67,7 +67,7 @@ pub(crate) async fn insert_awards<C: TransactionTrait + ConnectionTrait>(
 }
 
 /// Award a trophy for an user.
-#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD")]
+#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD", required_permissions = "MANAGE_GUILD")]
 pub async fn award(
     ctx: Context<'_>,
     #[description = "Name of the trophy to award"]
@@ -80,9 +80,7 @@ pub async fn award(
     count: Option<i64>,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("guild_only command invoked outside a guild"))?;
+    let guild_id = util::require_guild_id(&ctx)?;
     let db = &ctx.data().db;
 
     // F8: reject out-of-range counts server-side too (the Discord client
@@ -101,13 +99,15 @@ pub async fn award(
         .await;
     }
 
-    let Some(model) = resolver::resolve_trophy(db, guild_id.get() as i64, &trophy).await? else {
-        return util::reply_error(
-            ctx,
-            i18n::t_args(&locale, "award-error-not-found", &[("input", trophy.into())]),
-            true,
-        )
-        .await;
+    let Some(model) = resolver::resolve_trophy_or_reply(
+        ctx,
+        guild_id.get() as i64,
+        &trophy,
+        "award-error-not-found",
+    )
+    .await?
+    else {
+        return Ok(());
     };
 
     insert_awards(

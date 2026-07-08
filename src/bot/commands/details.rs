@@ -53,7 +53,7 @@ pub(crate) fn details_view(
 }
 
 /// Shows the details of a trophy.
-#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD")]
+#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD", required_permissions = "MANAGE_GUILD")]
 pub async fn details(
     ctx: Context<'_>,
     #[description = "Name of the trophy to show"]
@@ -61,18 +61,17 @@ pub async fn details(
     trophy: String,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("guild_only command invoked outside a guild"))?;
-    let db = &ctx.data().db;
+    let guild_id = util::require_guild_id(&ctx)?;
 
-    let Some(model) = resolver::resolve_trophy(db, guild_id.get() as i64, &trophy).await? else {
-        return util::reply_error(
-            ctx,
-            i18n::t_args(&locale, "details-error-not-found", &[("input", trophy.into())]),
-            true,
-        )
-        .await;
+    let Some(model) = resolver::resolve_trophy_or_reply(
+        ctx,
+        guild_id.get() as i64,
+        &trophy,
+        "details-error-not-found",
+    )
+    .await?
+    else {
+        return Ok(());
     };
 
     let view = details_view(&locale, &model);

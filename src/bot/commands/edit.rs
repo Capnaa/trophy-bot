@@ -32,7 +32,9 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-use crate::bot::commands::create::{parse_dedication, validate_fields, CreateError, Dedication};
+use crate::bot::commands::create::{
+    dedication_columns, parse_dedication, validate_fields, CreateError, Dedication,
+};
 use crate::bot::{images, resolver, util, Context, Error};
 use crate::domain::normalize::normalize_name;
 use crate::entities::trophies;
@@ -250,26 +252,30 @@ pub(crate) async fn apply_edit(
 }
 
 /// Resolves the raw dedication option: the legacy `"-"` sentinel clears it;
-/// a mention/snowflake becomes a user dedication with a best-effort
-/// display-name snapshot (same semantics as `/create`); anything else is
-/// plain text.
+/// a mention/snowflake becomes a user dedication with a display-name
+/// snapshot; an UNRESOLVABLE mention/snowflake falls back to a text
+/// dedication with the raw input; anything else is plain text — all exactly
+/// the `/create` semantics (see `create::dedication_columns`).
 async fn resolve_dedication(ctx: &Context<'_>, raw: &str) -> (Option<i64>, Option<String>) {
     if raw.trim() == CLEAR_DEDICATION {
         return (None, None);
     }
-    match parse_dedication(raw) {
-        Dedication::Text(text) => (None, Some(text)),
+    let parsed = parse_dedication(raw);
+    let fetched = match parsed {
         Dedication::User(id) => {
-            let name = match serenity::UserId::new(id).to_user(ctx.serenity_context()).await {
+            match serenity::UserId::new(id).to_user(ctx.serenity_context()).await {
                 Ok(user) => Some(user.name.clone()),
                 Err(err) => {
-                    log::debug!("could not resolve dedication user {id}: {err}");
+                    log::debug!(
+                        "could not resolve dedication user {id}, storing the raw text instead: {err}"
+                    );
                     None
                 }
-            };
-            (Some(id as i64), name)
+            }
         }
-    }
+        Dedication::Text(_) => None,
+    };
+    dedication_columns(raw, parsed, fetched)
 }
 
 /// Temp name a replacement image is downloaded under before the DB update.
@@ -283,17 +289,17 @@ pub(crate) fn temp_filename(filename: &str) -> String {
 /// update went through. Best-effort: past the commit an error can only be
 /// logged — the trophy then keeps serving the previous same-named file (or
 /// none), which beats having clobbered it before the update.
-pub(crate) fn promote_image(temp: &str, dest: &str) {
+pub(crate) async fn promote_image(temp: &str, dest: &str) {
     let dir = std::path::Path::new(images::IMAGES_DIR);
-    if let Err(err) = std::fs::rename(dir.join(temp), dir.join(dest)) {
+    if let Err(err) = tokio::fs::rename(dir.join(temp), dir.join(dest)).await {
         log::error!("failed to promote trophy image {temp} -> {dest}: {err}");
-        images::remove(temp);
+        images::remove(temp).await;
     }
 }
 
 /// Edit an existing trophy for your server.
 #[allow(clippy::too_many_arguments)]
-#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD")]
+#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD", required_permissions = "MANAGE_GUILD")]
 pub async fn edit(
     ctx: Context<'_>,
     #[description = "The trophy to be edited"]
@@ -308,19 +314,13 @@ pub async fn edit(
     #[description = "A new image for the trophy"] image: Option<serenity::Attachment>,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("guild_only command invoked outside a guild"))?
-        .get() as i64;
+    let guild_id = util::require_guild_id(&ctx)?.get() as i64;
     let db = &ctx.data().db;
 
-    let Some(current) = resolver::resolve_trophy(db, guild_id, &trophy).await? else {
-        return util::reply_error(
-            ctx,
-            i18n::t_args(&locale, "edit-error-not-found", &[("input", trophy.into())]),
-            true,
-        )
-        .await;
+    let Some(current) =
+        resolver::resolve_trophy_or_reply(ctx, guild_id, &trophy, "edit-error-not-found").await?
+    else {
+        return Ok(());
     };
 
     // Validate BEFORE any download or write — shared rules (and localized
@@ -405,11 +405,14 @@ pub async fn edit(
     let old_image = current.image.clone();
     let new_image = plan.image.clone().filter(|_| image_plan.is_some());
     let temp_image = new_image.as_deref().map(temp_filename);
+    // Error replies past the public defer use `reply_error_ephemeral`: a
+    // plain followup could not make the error private (§2: all error replies
+    // are ephemeral).
     if let (Some((url, _)), Some(temp)) = (&image_plan, &temp_image) {
         ctx.defer().await?;
         if let Err(err) = images::download(url, temp).await {
             log::warn!("/edit image download failed (guild={guild_id}): {err:#}");
-            return util::reply_error(ctx, i18n::t(&locale, "create-error-image-download"), true)
+            return util::reply_error_ephemeral(ctx, i18n::t(&locale, "create-error-image-download"))
                 .await;
         }
     }
@@ -420,20 +423,21 @@ pub async fn edit(
             // The temp file never shadows a stored filename: dropping it
             // leaves the previous image fully intact.
             if let Some(temp) = &temp_image {
-                images::remove(temp);
+                images::remove(temp).await;
             }
-            return util::reply_error(ctx, err.message(&locale), true).await;
+            // Race-window rename collision: may run after the public defer.
+            return util::reply_error_ephemeral(ctx, err.message(&locale)).await;
         }
         Err(err) => {
             if let Some(temp) = &temp_image {
-                images::remove(temp);
+                images::remove(temp).await;
             }
             return Err(err);
         }
     };
 
     if let (Some(temp), Some(new)) = (&temp_image, &new_image) {
-        promote_image(temp, new);
+        promote_image(temp, new).await;
     }
 
     // The previous image file is orphaned once replaced by one with a
@@ -441,7 +445,7 @@ pub async fn edit(
     if let (Some(new), Some(old)) = (&new_image, &old_image)
         && new != old
     {
-        images::remove(old);
+        images::remove(old).await;
     }
 
     let embed = serenity::CreateEmbed::new()
@@ -765,8 +769,8 @@ mod tests {
         assert_ne!(temp, stored);
     }
 
-    #[test]
-    fn promote_image_replaces_the_final_file_only_on_promotion() {
+    #[tokio::test]
+    async fn promote_image_replaces_the_final_file_only_on_promotion() {
         let dir = std::path::Path::new(images::IMAGES_DIR);
         std::fs::create_dir_all(dir).unwrap();
         let dest = images::filename(1, Uuid::now_v7(), "png");
@@ -778,24 +782,39 @@ mod tests {
         // failure path only drops the temp and never touches the original).
         assert_eq!(std::fs::read(dir.join(&dest)).unwrap(), b"old bytes");
 
-        promote_image(&temp, &dest);
+        promote_image(&temp, &dest).await;
         assert_eq!(std::fs::read(dir.join(&dest)).unwrap(), b"new bytes");
         assert!(!dir.join(&temp).exists(), "temp file is consumed");
 
-        images::remove(&dest);
+        images::remove(&dest).await;
     }
 
-    #[test]
-    fn promote_image_with_missing_temp_leaves_the_final_file_alone() {
+    #[tokio::test]
+    async fn promote_image_with_missing_temp_leaves_the_final_file_alone() {
         let dir = std::path::Path::new(images::IMAGES_DIR);
         std::fs::create_dir_all(dir).unwrap();
         let dest = images::filename(1, Uuid::now_v7(), "png");
         std::fs::write(dir.join(&dest), b"old bytes").unwrap();
 
-        promote_image(&temp_filename(&dest), &dest);
+        promote_image(&temp_filename(&dest), &dest).await;
         assert_eq!(std::fs::read(dir.join(&dest)).unwrap(), b"old bytes");
 
-        images::remove(&dest);
+        images::remove(&dest).await;
+    }
+
+    /// Same guard as in `create.rs`: after the PUBLIC image-path defer,
+    /// error replies must use `reply_error_ephemeral` (§2).
+    #[test]
+    fn errors_after_the_public_defer_are_ephemeral() {
+        let src = include_str!("edit.rs");
+        let handler = src.split("pub async fn edit").nth(1).expect("handler exists");
+        let defer = handler.find("ctx.defer()").expect("image path defers");
+        let plain_reply_error = concat!("util::reply_", "error(");
+        assert!(
+            !handler[defer..].contains(plain_reply_error),
+            "an error path after ctx.defer() uses the plain reply_error; \
+             use util::reply_error_ephemeral instead"
+        );
     }
 
     // --- i18n catalog ---

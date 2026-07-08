@@ -6,7 +6,8 @@
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait, NotSet, Set,
+    ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
+    NotSet, Set,
 };
 use sea_orm_migration::MigratorTrait;
 use uuid::Uuid;
@@ -14,7 +15,7 @@ use uuid::Uuid;
 use crate::entities::{
     bot_stats, guild_settings, guilds, leaderboard_panels, role_rewards, trophies, user_trophies,
 };
-use crate::migrations::Migrator;
+use crate::migrations::{run_schema_command, MigrateSubcommands, Migrator};
 
 async fn fresh_db() -> DatabaseConnection {
     // A single connection is required: every pooled connection to
@@ -324,6 +325,9 @@ async fn role_reward_requirement_check_constraint_enforces_minimum() {
     }
 }
 
+/// One mutation applied to a baseline settings model in the CHECK-range test.
+type SettingsMutation = fn(&mut guild_settings::ActiveModel);
+
 #[tokio::test]
 async fn guild_settings_check_constraints_enforce_ranges() {
     let db = fresh_db().await;
@@ -341,7 +345,7 @@ async fn guild_settings_check_constraints_enforce_ranges() {
     };
 
     // One out-of-range probe per column (max + 1); each must be rejected.
-    let out_of_range: [(&str, fn(&mut guild_settings::ActiveModel)); 6] = [
+    let out_of_range: [(&str, SettingsMutation); 6] = [
         ("dedication_display = 3", |m| m.dedication_display = Set(Some(3))),
         ("stack_roles = 2", |m| m.stack_roles = Set(Some(2))),
         ("hide_unused_trophies = 2", |m| {
@@ -534,6 +538,70 @@ async fn migration_down_drops_all_tables_and_up_reapplies() {
         .expect("guilds table exists again")
         .is_empty());
     insert_guild(&db, 1).await;
+}
+
+/// Fix for the ops-correctness finding: schema subcommands must **propagate**
+/// migration failures (non-zero exit) instead of logging and returning Ok, so
+/// a cutover script chained with `&&` stops at the failed `up` rather than
+/// proceeding to `import` against a broken schema.
+#[tokio::test]
+async fn run_schema_command_propagates_migration_failure() {
+    let mut options = ConnectOptions::new("sqlite::memory:");
+    options.max_connections(1).sqlx_logging(false);
+    let db = Database::connect(options)
+        .await
+        .expect("connect to in-memory sqlite");
+
+    // Sabotage: a pre-existing, unrecorded `guilds` table makes the initial
+    // migration's CREATE TABLE fail.
+    db.execute_unprepared("CREATE TABLE guilds (bogus INTEGER)")
+        .await
+        .expect("create conflicting table");
+
+    for command in [
+        Some(MigrateSubcommands::Up { num: None }),
+        None, // bare invocation defaults to `up`
+        Some(MigrateSubcommands::Refresh),
+    ] {
+        let label = format!("{command:?}");
+        let result = run_schema_command(&db, command).await;
+        assert!(
+            result.is_err(),
+            "{label} must return Err on a failed migration (exit non-zero), got Ok"
+        );
+    }
+}
+
+/// Successful schema subcommands still return Ok.
+#[tokio::test]
+async fn run_schema_command_returns_ok_on_success() {
+    let mut options = ConnectOptions::new("sqlite::memory:");
+    options.max_connections(1).sqlx_logging(false);
+    let db = Database::connect(options)
+        .await
+        .expect("connect to in-memory sqlite");
+
+    for command in [
+        Some(MigrateSubcommands::Fresh),
+        Some(MigrateSubcommands::Status),
+        Some(MigrateSubcommands::Down { num: 1 }),
+        Some(MigrateSubcommands::Up { num: None }),
+        Some(MigrateSubcommands::Refresh),
+        Some(MigrateSubcommands::Reset),
+        None, // bare invocation defaults to `up`
+    ] {
+        let label = format!("{command:?}");
+        run_schema_command(&db, command)
+            .await
+            .unwrap_or_else(|e| panic!("{label} must succeed: {e}"));
+    }
+
+    // The final bare invocation applied the schema.
+    assert!(guilds::Entity::find()
+        .all(&db)
+        .await
+        .expect("guilds table exists")
+        .is_empty());
 }
 
 #[tokio::test]

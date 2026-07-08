@@ -1,9 +1,9 @@
 //! One file per slash command (implementation-plan C0). `all()` is the single
 //! registration point consumed by the framework in `src/bot/mod.rs`.
 //!
-//! `/ping` and `/about` are fully implemented; the rest are localized
-//! "under construction" stubs so the whole command set compiles and
-//! registers from day one. Each stub file names the batch that implements it.
+//! All 24 commands are fully implemented; each file carries the poise handler
+//! plus its business logic (or delegates to shared modules such as
+//! `crate::bot::render`).
 
 mod about;
 // `pub(crate)` modules expose their plain business-logic functions to the
@@ -11,7 +11,9 @@ mod about;
 pub(crate) mod award;
 pub(crate) mod clear;
 pub(crate) mod create;
-mod delete;
+// `pub(crate)` so the /delete confirmation-button handler
+// (`src/bot/buttons.rs`) can reach `delete_trophy` on confirm.
+pub(crate) mod delete;
 mod details;
 mod edit;
 mod export;
@@ -27,7 +29,9 @@ pub(crate) mod revoke;
 pub(crate) mod rewards;
 mod settings;
 mod show;
-mod stats;
+// `pub(crate)` so the framework's `post_command` hook (src/bot/mod.rs) can
+// reach `stats::record_successful_run` for the success-only run counters.
+pub(crate) mod stats;
 mod suggest;
 mod support;
 mod trophies;
@@ -115,6 +119,15 @@ mod tests {
                 Permissions::MANAGE_GUILD,
                 "/{name} must default to Manage Guild"
             );
+            // rust-parity-plan §2: permissions are checked at registration
+            // AND defensively at runtime. Poise applies a parent command's
+            // `required_permissions` to its subcommands too, so setting it
+            // on the top-level command covers `/rewards add` etc.
+            assert_eq!(
+                command.required_permissions,
+                Permissions::MANAGE_GUILD,
+                "/{name} must require Manage Guild at runtime"
+            );
             assert!(command.guild_only, "/{name} must be guild-only");
         }
     }
@@ -129,6 +142,11 @@ mod tests {
                 Permissions::ADMINISTRATOR,
                 "/{name} must default to Administrator"
             );
+            assert_eq!(
+                command.required_permissions,
+                Permissions::ADMINISTRATOR,
+                "/{name} must require Administrator at runtime"
+            );
             assert!(command.guild_only, "/{name} must be guild-only");
         }
     }
@@ -139,6 +157,11 @@ mod tests {
         for name in ["show", "trophies", "leaderboard"] {
             let command = &commands[find(&commands, name)];
             assert_eq!(command.default_member_permissions, Permissions::empty());
+            assert_eq!(
+                command.required_permissions,
+                Permissions::empty(),
+                "/{name} must not demand runtime permissions"
+            );
             assert!(command.guild_only, "/{name} must be guild-only");
         }
     }

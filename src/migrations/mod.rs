@@ -40,23 +40,34 @@ pub async fn cli(cli: Cli) -> anyhow::Result<()> {
         return crate::import::run(&db, legacy_db).await;
     }
 
-    let result = match cli.command {
-        Some(MigrateSubcommands::Fresh) => Migrator::fresh(&db).await,
-        Some(MigrateSubcommands::Refresh) => Migrator::refresh(&db).await,
-        Some(MigrateSubcommands::Reset) => Migrator::reset(&db).await,
-        Some(MigrateSubcommands::Status) => Migrator::status(&db).await,
-        Some(MigrateSubcommands::Up { num }) => Migrator::up(&db, num).await,
-        Some(MigrateSubcommands::Down { num }) => Migrator::down(&db, Some(num)).await,
-        Some(MigrateSubcommands::Import { .. }) => unreachable!("handled above"),
+    run_schema_command(&db, cli.command).await
+}
+
+/// Runs a schema migration subcommand. Errors are logged and **propagated**
+/// so the process exits non-zero on a failed migration — a cutover script
+/// chaining `trophy-bot up && trophy-bot import` must stop at the failed `up`
+/// instead of importing into a broken schema.
+async fn run_schema_command(
+    db: &sea_orm::DatabaseConnection,
+    command: Option<MigrateSubcommands>,
+) -> anyhow::Result<()> {
+    let result = match command {
+        Some(MigrateSubcommands::Fresh) => Migrator::fresh(db).await,
+        Some(MigrateSubcommands::Refresh) => Migrator::refresh(db).await,
+        Some(MigrateSubcommands::Reset) => Migrator::reset(db).await,
+        Some(MigrateSubcommands::Status) => Migrator::status(db).await,
+        Some(MigrateSubcommands::Up { num }) => Migrator::up(db, num).await,
+        Some(MigrateSubcommands::Down { num }) => Migrator::down(db, Some(num)).await,
+        Some(MigrateSubcommands::Import { .. }) => unreachable!("handled by cli()"),
         Some(MigrateSubcommands::Smoke) => unreachable!("routed to crate::smoke in main"),
-        None => Migrator::up(&db, None).await,
+        None => Migrator::up(db, None).await,
     };
 
-    if let Err(err) = result {
+    if let Err(err) = &result {
         log::error!("{}", err);
     }
 
-    Ok(())
+    Ok(result?)
 }
 
 #[derive(Subcommand, PartialEq, Eq, Debug)]

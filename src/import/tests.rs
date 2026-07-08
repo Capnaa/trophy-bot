@@ -130,7 +130,11 @@ async fn tombstones_and_corrupt_entries_are_skipped_and_reported() {
     let (db, report) = import_fixture().await;
 
     assert_eq!(report.tombstoned_guilds, vec!["200".to_string()]);
-    assert_eq!(report.corrupt_guilds, vec!["999".to_string()]);
+    // The corrupt entry carries its verbatim legacy value so the pre-cutover
+    // review can inspect it without excavating the multi-megabyte blob.
+    assert_eq!(report.corrupt_guilds.len(), 1);
+    assert_eq!(report.corrupt_guilds[0].key, "999");
+    assert_eq!(report.corrupt_guilds[0].value, serde_json::json!("broken"));
     assert_eq!(report.guilds, 2);
 
     let ids: Vec<i64> = guilds::Entity::find()
@@ -405,6 +409,125 @@ async fn invalid_present_field_values_are_nulled_and_reported() {
     assert!(report.defaulted_fields.is_empty());
 }
 
+/// Defense (spec principle 3): a legacy trophy value beyond the ±999,999
+/// schema CHECK range is clamped to the nearest bound AND reported, instead
+/// of aborting the whole all-or-nothing import with an opaque chunk-level
+/// CHECK violation that names no guild or trophy. Production has 0 of these.
+#[tokio::test]
+async fn out_of_range_trophy_values_clamped_and_reported() {
+    let fixture = r#"{
+      "600": {
+        "trophies": {
+          "current": 2,
+          "1": {"name": "TooBig", "value": 10000000, "creator": "1", "created": 1,
+                "signed": false, "details": "d"},
+          "2": {"name": "TooSmall", "value": -10000000.5, "creator": "1", "created": 1,
+                "signed": false, "details": "d"}
+        },
+        "users": {"500": {"trophies": ["1"], "trophyValue": 10000000}}
+      }
+    }"#;
+    let db = fresh_db().await;
+    let report = import_data(&db, &legacy_from_json(fixture), &opts_no_images())
+        .await
+        .expect("out-of-range values must not abort the import");
+
+    assert_eq!(trophy(&db, 600, "1").await.value, 999_999, "clamped to the upper CHECK bound");
+    assert_eq!(trophy(&db, 600, "2").await.value, -999_999, "clamped to the lower CHECK bound");
+
+    assert_eq!(report.invalid_fields.len(), 2);
+    assert!(report.invalid_fields.iter().all(|f| f.guild_id == 600 && f.field == "value"));
+    let invalid: HashMap<&str, &str> =
+        report.invalid_fields.iter().map(|f| (f.legacy_id.as_str(), f.value.as_str())).collect();
+    assert_eq!(invalid.get("1"), Some(&"10000000"));
+    assert_eq!(invalid.get("2"), Some(&"-10000000.5"));
+    // The clamp is reported as invalid, not double-reported as a rounding.
+    assert!(report.rounded_values.is_empty());
+    // The award of the clamped trophy still imports.
+    assert_eq!(report.awards_inserted, 1);
+}
+
+/// Defense: a present setting index outside its column's CHECK range imports
+/// as NULL (the code-side default applies, like an absent key) AND is
+/// reported, instead of aborting on the guild_settings CHECK constraint.
+#[tokio::test]
+async fn out_of_range_setting_indexes_nulled_and_reported() {
+    let fixture = r#"{
+      "600": {
+        "settings": {"stack_roles": 5, "leaderboard_format": 2},
+        "trophies": {"current": 0},
+        "users": {}
+      },
+      "601": {
+        "settings": {"dedication_display": -1},
+        "trophies": {"current": 0},
+        "users": {}
+      }
+    }"#;
+    let db = fresh_db().await;
+    let report = import_data(&db, &legacy_from_json(fixture), &opts_no_images())
+        .await
+        .expect("out-of-range setting must not abort the import");
+
+    // Guild 600 keeps a row for its valid key; the invalid one stays NULL.
+    let row = guild_settings::Entity::find_by_id(600)
+        .one(&db)
+        .await
+        .expect("query settings")
+        .expect("guild 600 has a settings row");
+    assert_eq!(row.stack_roles, None, "out-of-range index → NULL (code-side default)");
+    assert_eq!(row.leaderboard_format, Some(2), "valid keys unaffected");
+
+    // Guild 601's only key is invalid → no row at all, like empty settings.
+    assert!(guild_settings::Entity::find_by_id(601).one(&db).await.expect("query 601").is_none());
+
+    assert_eq!(report.invalid_fields.len(), 2);
+    assert!(report.invalid_fields.iter().all(|f| f.field == "setting"));
+    let invalid: HashMap<(&str, i64), &str> = report
+        .invalid_fields
+        .iter()
+        .map(|f| ((f.legacy_id.as_str(), f.guild_id), f.value.as_str()))
+        .collect();
+    assert_eq!(invalid.get(&("stack_roles", 600)), Some(&"5"));
+    assert_eq!(invalid.get(&("dedication_display", 601)), Some(&"-1"));
+}
+
+/// Defense: a reward entry whose requirement violates the schema
+/// `CHECK (requirement >= 1)` (or exceeds i32) is dropped AND reported,
+/// instead of aborting on the role_rewards CHECK constraint.
+#[tokio::test]
+async fn invalid_reward_requirements_dropped_and_reported() {
+    let fixture = r#"{
+      "600": {
+        "trophies": {"current": 0},
+        "users": {},
+        "rewards": [
+          {"role": "700", "requirement": 0},
+          {"role": "701", "requirement": 5},
+          {"role": "702", "requirement": 4294967296}
+        ]
+      }
+    }"#;
+    let db = fresh_db().await;
+    let report = import_data(&db, &legacy_from_json(fixture), &opts_no_images())
+        .await
+        .expect("invalid reward requirements must not abort the import");
+
+    let rows = role_rewards::Entity::find().all(&db).await.expect("query rewards");
+    assert_eq!(rows.len(), 1, "only the valid reward is imported");
+    assert_eq!((rows[0].role_id, rows[0].requirement), (701, 5));
+    assert_eq!(report.role_rewards, 1);
+
+    assert_eq!(report.invalid_fields.len(), 2);
+    assert!(report.invalid_fields.iter().all(|f| f.guild_id == 600
+        && f.field == "reward.requirement"));
+    let invalid: HashMap<&str, &str> =
+        report.invalid_fields.iter().map(|f| (f.legacy_id.as_str(), f.value.as_str())).collect();
+    assert_eq!(invalid.get("700"), Some(&"0"), "below the CHECK minimum of 1");
+    assert_eq!(invalid.get("702"), Some(&"4294967296"), "beyond i32");
+    assert!(report.deduped_rewards.is_empty(), "dropped entries are not dedupe removals");
+}
+
 /// The emptiness check must also cover `bot_stats` — the one imported table
 /// not FK-anchored to `guilds` — so a target that ran with zero guilds gets
 /// the clear refusal instead of a mid-transaction UNIQUE(bot_stats.name)
@@ -433,15 +556,17 @@ async fn refuses_when_only_bot_stats_rows_exist() {
     assert_eq!(count, 1, "the refused run must not touch existing rows");
 }
 
-/// All-or-nothing (spec principle 2): a failure in the LAST insert phase
-/// (guild_settings CHECK, leaderboard_format 9 > 3) must roll back every
-/// earlier insert — bot_stats, guilds, trophies, awards, rewards and panels.
+/// All-or-nothing (spec principle 2): a mid-transaction insert failure must
+/// roll back every insert that already ran. The trigger is two root keys
+/// (`100` and `0100`) parsing to the same guild id → guilds PK violation,
+/// after the bot_stats phase already inserted its rows. (Out-of-range
+/// settings/values/requirements can no longer trigger this: they are caught
+/// and reported during in-memory preparation instead of reaching a CHECK.)
 #[tokio::test]
 async fn failed_insert_rolls_back_all_prior_phases() {
     let fixture = r#"{
       "100": {
         "imsafe": true,
-        "settings": {"leaderboard_format": 9},
         "trophies": {
           "current": 1,
           "1": {"name": "T", "value": 10, "creator": "55", "created": 1600000000000,
@@ -450,13 +575,14 @@ async fn failed_insert_rolls_back_all_prior_phases() {
         "users": {"500": {"trophies": ["1"], "trophyValue": 10}},
         "rewards": [{"role": "700", "requirement": 5}],
         "panel": {"message": "900", "channel": "901"}
-      }
+      },
+      "0100": {"trophies": {"current": 0}, "users": {}}
     }"#;
     let db = fresh_db().await;
     let err = import_data(&db, &legacy_from_json(fixture), &opts_no_images())
         .await
-        .expect_err("out-of-range setting must fail the import");
-    assert!(err.to_string().contains("guild_settings"), "failure is the settings insert: {err:#}");
+        .expect_err("duplicate guild ids must fail the import");
+    assert!(err.to_string().contains("inserting guilds"), "failure is the guilds insert: {err:#}");
 
     // Every phase that inserted before the failure was rolled back.
     assert_eq!(bot_stats::Entity::find().count(&db).await.unwrap(), 0, "bot_stats rolled back");
@@ -671,7 +797,55 @@ async fn report_serializes_to_json_with_summary() {
 
     // Summary compares measured vs the production-expected counts.
     let rows = report.summary_rows();
-    let guilds_row = rows.iter().find(|(name, _, _)| *name == "guilds").expect("guilds row");
-    assert_eq!(guilds_row.1, 2, "measured");
-    assert_eq!(guilds_row.2, 2_488, "expected (production)");
+    let row = |name: &str| -> (u64, u64) {
+        let (_, measured, expected) =
+            rows.iter().find(|(n, _, _)| *n == name).unwrap_or_else(|| panic!("`{name}` row"));
+        (*measured, *expected)
+    };
+    assert_eq!(row("guilds"), (2, 2_488));
+
+    // Every spec-stated production count is machine-checked in the summary
+    // (migration-import.md), not just present as a raw JSON field:
+    // 43 incomplete trophies (Phase 3), 1,284 empty-award users (Phase 4),
+    // 162 guilds with non-empty settings (Phase 5), 2,693 − 200 = 2,493 local
+    // images kept and 278 orphan disk files (Phase 6).
+    assert_eq!(
+        row("defaulted_trophies"),
+        (2, 43),
+        "fixture trophies 100/2 (most fields) and 100/3 (description, emoji) are incomplete; \
+         each counts once regardless of how many fields were defaulted"
+    );
+    assert_eq!(row("empty_award_users"), (1, 1_284), "fixture user 501 has an empty array");
+    assert_eq!(row("settings_rows"), (1, 162), "guild 100 only; empty settings get no row");
+    assert_eq!(row("local_images_kept"), (0, 2_493), "no images dir in this fixture");
+    assert_eq!(row("orphan_disk_files"), (0, 278), "no images dir in this fixture");
+}
+
+/// The spec's expected 43 counts incomplete TROPHIES, but `defaulted_fields`
+/// records one entry per absent FIELD: the summary metric must count distinct
+/// (guild, legacy_id) pairs.
+#[test]
+fn defaulted_trophies_counts_distinct_trophies_not_fields() {
+    use super::report::{DefaultedField, ImportReport};
+
+    let mut report = ImportReport::default();
+    for (guild_id, legacy_id, field) in [
+        (100, "2", "creator"),
+        (100, "2", "created"),
+        (100, "2", "signed"),
+        (100, "7", "details"),
+        (300, "2", "creator"), // same legacy id, different guild
+    ] {
+        report.defaulted_fields.push(DefaultedField {
+            guild_id,
+            legacy_id: legacy_id.to_string(),
+            field,
+        });
+    }
+
+    assert_eq!(report.defaulted_trophies(), 3);
+    let rows = report.summary_rows();
+    let (_, measured, expected) =
+        rows.iter().find(|(n, _, _)| *n == "defaulted_trophies").expect("defaulted_trophies row");
+    assert_eq!((*measured, *expected), (3, 43));
 }

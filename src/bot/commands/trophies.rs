@@ -14,7 +14,8 @@ use poise::serenity_prelude as serenity;
 use sea_orm::sea_query::{Alias, Expr, ExprTrait, Order, Query};
 use sea_orm::{ConnectionTrait, DbErr};
 
-use crate::bot::{Context, Error, util};
+use crate::bot::util::{self, paginate};
+use crate::bot::{Context, Error};
 use crate::domain::queries;
 use crate::domain::settings::{self, Setting};
 use crate::entities::{trophies, user_trophies};
@@ -266,17 +267,6 @@ pub async fn guild_trophy_rows(
         .collect()
 }
 
-/// Legacy `getPage` semantics: `last = ceil(len / per_page)` floored at 1,
-/// `page` clamped to `[1, last]`; returns the slice, the clamped page and
-/// `last`. An empty list yields `([], 1, 1)`.
-pub fn paginate<T>(items: &[T], per_page: usize, requested: i64) -> (&[T], usize, usize) {
-    let last = items.len().div_ceil(per_page).max(1);
-    let page = requested.clamp(1, last as i64) as usize;
-    let start = (page - 1) * per_page;
-    let end = usize::min(start + per_page, items.len());
-    (&items[start..end], page, last)
-}
-
 /// Legacy value cosmetics: positive → ` **+N**`, negative → ` **-N**`,
 /// zero → nothing at all (leading space included so rows compose cleanly).
 pub fn value_markup(value: i32) -> String {
@@ -308,10 +298,7 @@ fn page_footer(locale: &i18n::LanguageIdentifier, page: usize, last: usize) -> S
 }
 
 fn require_guild_id(ctx: &Context<'_>) -> Result<i64, Error> {
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("/trophies invoked outside a guild"))?;
-    Ok(i64::try_from(guild_id.get())?)
+    Ok(util::require_guild_id(ctx)?.get() as i64)
 }
 
 #[cfg(test)]
@@ -323,31 +310,7 @@ mod tests {
     use crate::domain::test_support::{fresh_db, insert_guild, now};
 
     // ---- pure logic -----------------------------------------------------
-
-    #[test]
-    fn paginate_empty_list_is_single_empty_page() {
-        let items: [i32; 0] = [];
-        let (slice, page, last) = paginate(&items, 10, 1);
-        assert!(slice.is_empty());
-        assert_eq!((page, last), (1, 1));
-    }
-
-    #[test]
-    fn paginate_clamps_out_of_range_pages() {
-        let items: Vec<i32> = (0..25).collect();
-        let (slice, page, last) = paginate(&items, 10, -5);
-        assert_eq!((slice.len(), page, last), (10, 1, 3));
-        let (slice, page, last) = paginate(&items, 10, 99);
-        assert_eq!((slice.len(), page, last), (5, 3, 3));
-    }
-
-    #[test]
-    fn paginate_slices_the_requested_page() {
-        let items: Vec<i32> = (0..25).collect();
-        let (slice, page, last) = paginate(&items, 10, 2);
-        assert_eq!(slice, &items[10..20]);
-        assert_eq!((page, last), (2, 3));
-    }
+    // (pagination tests live with `paginate` in `crate::bot::util`)
 
     #[test]
     fn value_markup_matches_legacy_cosmetics() {

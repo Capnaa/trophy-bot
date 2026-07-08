@@ -12,9 +12,17 @@
 //!   reward roles — unrelated roles are never removed;
 //! - every Discord call is AWAITED; hierarchy violations, managed roles and
 //!   deleted roles are skipped with a log line; API failures are logged with
-//!   full context. Nothing here panics or takes the process down.
+//!   full context. Nothing here panics or takes the process down;
+//! - applications for the SAME (guild, user) are serialized through a
+//!   per-pair async lock, and the score is recomputed under that lock — so
+//!   concurrent `/award` + `/revoke` for one member cannot interleave into a
+//!   role set that no longer matches the final committed score (TOCTOU).
+//!   The last invocation to run always recomputes from the fully committed
+//!   database state and converges the member onto it. Distinct (guild, user)
+//!   pairs never block each other.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
 
 use poise::serenity_prelude as serenity;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -46,6 +54,29 @@ pub struct RoleMeta {
     pub position: u16,
     /// Integration/bot-managed roles can never be assigned manually.
     pub managed: bool,
+}
+
+/// Per-(guild, user) apply locks. Entries are weak so the map never grows
+/// beyond the pairs currently being applied; dead entries are pruned on every
+/// lookup. A `std` mutex guards the map itself (held only for the lookup,
+/// never across an await); the returned `tokio` mutex is what serializes the
+/// recompute-then-apply critical section.
+type ApplyLockMap = HashMap<(i64, i64), Weak<tokio::sync::Mutex<()>>>;
+
+static APPLY_LOCKS: LazyLock<StdMutex<ApplyLockMap>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// The serialization lock for one (guild, user) pair. Two callers passing the
+/// same pair get the same lock; distinct pairs get independent locks.
+fn apply_lock(guild_id: i64, user_id: i64) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = APPLY_LOCKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    map.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(existing) = map.get(&(guild_id, user_id)).and_then(Weak::upgrade) {
+        return existing;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    map.insert((guild_id, user_id), Arc::downgrade(&lock));
+    lock
 }
 
 /// Pure diff: which reward roles to add and which to remove so the member
@@ -177,7 +208,11 @@ pub async fn apply_rewards(
 /// - roles above/at the bot's highest role, managed roles and roles deleted
 ///   from the guild (F24 keeps their rows) are skipped with a warning;
 /// - each add/remove is awaited individually — one failing role does not
-///   abort the others, every failure is logged with guild/user/role context.
+///   abort the others, every failure is logged with guild/user/role context;
+/// - the whole recompute→diff→apply section runs under a per-(guild, user)
+///   lock, so concurrent score-changing commands for the same member cannot
+///   race each other into stale role state (the score is re-read from the
+///   database only after the lock is held).
 ///
 /// `Err` is returned only for infrastructure failures before any role change
 /// is attempted (DB errors, role list unavailable); callers log it — the
@@ -192,6 +227,13 @@ pub async fn apply_rewards_via(
 ) -> anyhow::Result<()> {
     let gid = guild_id.get() as i64;
     let uid = user_id.get() as i64;
+
+    // Serialize with any other in-flight application for this member. The
+    // score/target recompute below MUST happen after the lock is acquired:
+    // that is what closes the TOCTOU between a command's commit and its role
+    // application when /award and /revoke race for the same user.
+    let lock = apply_lock(gid, uid);
+    let _guard = lock.lock().await;
 
     let Some((target, configured)) = target_for_user(db, gid, uid).await? else {
         return Ok(());
@@ -269,6 +311,109 @@ mod tests {
 
     fn meta(position: u16) -> RoleMeta {
         RoleMeta { position, managed: false }
+    }
+
+    // --- apply_lock (per-(guild, user) serialization, TOCTOU fix) ---
+    //
+    // These tests use guild ids in the 900_000+ range, unique per test, so
+    // parallel tests never contend on the process-wide APPLY_LOCKS registry.
+
+    #[tokio::test]
+    async fn same_pair_shares_one_lock_and_distinct_pairs_do_not() {
+        let a1 = apply_lock(900_001, 1);
+        let a2 = apply_lock(900_001, 1);
+        let other_user = apply_lock(900_001, 2);
+        let other_guild = apply_lock(900_002, 1);
+        assert!(Arc::ptr_eq(&a1, &a2), "same (guild, user) must share one lock");
+        assert!(!Arc::ptr_eq(&a1, &other_user), "different users must not share a lock");
+        assert!(!Arc::ptr_eq(&a1, &other_guild), "different guilds must not share a lock");
+    }
+
+    #[tokio::test]
+    async fn lock_registry_prunes_dead_entries() {
+        let first = apply_lock(900_010, 7);
+        let weak = Arc::downgrade(&first);
+        drop(first);
+        // A fresh lookup prunes the dead entry and mints a new lock.
+        let second = apply_lock(900_010, 7);
+        assert!(weak.upgrade().is_none(), "dropped lock must not be resurrected");
+        let map = APPLY_LOCKS.lock().unwrap();
+        assert!(
+            map.get(&(900_010, 7)).is_some_and(|w| w.strong_count() == 1),
+            "registry must hold exactly the live lock"
+        );
+        drop(map);
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn concurrent_applications_for_one_member_are_serialized() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let in_section = Arc::new(AtomicUsize::new(0));
+        let overlaps = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let in_section = Arc::clone(&in_section);
+            let overlaps = Arc::clone(&overlaps);
+            handles.push(tokio::spawn(async move {
+                let lock = apply_lock(900_020, 42);
+                let _guard = lock.lock().await;
+                if in_section.fetch_add(1, Ordering::SeqCst) != 0 {
+                    overlaps.fetch_add(1, Ordering::SeqCst);
+                }
+                // Yield inside the critical section: without the lock another
+                // task would enter here and the overlap counter would trip.
+                tokio::task::yield_now().await;
+                in_section.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("task");
+        }
+        assert_eq!(overlaps.load(Ordering::SeqCst), 0, "critical sections overlapped");
+    }
+
+    /// The confirmed TOCTOU scenario: `/award` +100 and `/revoke` -100 race
+    /// for the same member (score 0, reward role requires 100). Each task
+    /// "commits" its score change first, then — under the apply lock —
+    /// re-reads the score and rewrites the role state, with a yield inside
+    /// the window that previously let a stale target land last. Serialized
+    /// recompute-under-lock means whichever application runs last has seen
+    /// every commit whose application already ran, so the final role state
+    /// always matches the final score (0 → no role), in every interleaving.
+    #[tokio::test]
+    async fn racing_award_and_revoke_converge_on_the_final_score() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+
+        for _ in 0..50 {
+            let score = Arc::new(AtomicI64::new(0));
+            let has_role = Arc::new(std::sync::Mutex::new(false));
+            let mut handles = Vec::new();
+            for delta in [100i64, -100] {
+                let score = Arc::clone(&score);
+                let has_role = Arc::clone(&has_role);
+                handles.push(tokio::spawn(async move {
+                    // The command's own DB commit happens before the engine runs.
+                    score.fetch_add(delta, Ordering::SeqCst);
+                    let lock = apply_lock(900_030, 9);
+                    let _guard = lock.lock().await;
+                    // Recompute under the lock (mirrors target_for_user)...
+                    let current = score.load(Ordering::SeqCst);
+                    // ...yield inside the old race window...
+                    tokio::task::yield_now().await;
+                    // ...then apply the roles for the recomputed score.
+                    *has_role.lock().unwrap() = current >= 100;
+                }));
+            }
+            for handle in handles {
+                handle.await.expect("task");
+            }
+            assert!(
+                !*has_role.lock().unwrap(),
+                "final score is 0: the member must not keep the reward role"
+            );
+        }
     }
 
     // --- plan_changes ---

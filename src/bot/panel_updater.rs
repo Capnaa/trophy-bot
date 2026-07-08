@@ -8,13 +8,17 @@
 //!   reconciliation sweep (~15 min) still walks every panel so drift from
 //!   missed signals or restarts heals itself — unlike the legacy loop
 //!   (60 s + 1 s/guild ≈ 42 min full cycle at production scale) it is a
-//!   safety net, not the primary mechanism.
+//!   safety net, not the primary mechanism. The sweep runs on its OWN task
+//!   ([`SweepSlot`]) so debounced signals keep being serviced while it
+//!   paces through hundreds of panels.
 //! - F31: [`save_panel`] is only called by `/panel create` AFTER the panel
 //!   message was successfully sent — no record ever points at a stub.
 //! - F32: any refresh (debounced or sweep) that hits a **404** (unknown
 //!   channel/message) deletes the record ([`settle_refresh`]) — day one the
 //!   import brings 461 rows, many pointing at long-dead messages, and the
-//!   first sweep clears them out.
+//!   first sweep clears them out. The delete is keyed on the exact message
+//!   that 404'd, so a record concurrently replaced by `/panel create`
+//!   survives instead of being destroyed by a stale sweep snapshot.
 //!
 //! Rendering goes through the shared `crate::bot::render` path (same code
 //! as `/leaderboard`, F13-F16): page 1, no footer, default locale — panels
@@ -84,6 +88,7 @@ pub fn signal_channel() -> (PanelSignal, mpsc::UnboundedReceiver<i64>) {
 
 /// Cache + HTTP pair for Discord calls outside an interaction context.
 /// `Bot::new` builds it from the serenity client's shared handles.
+#[derive(Clone)]
 pub struct CacheAndHttp {
     pub cache: Arc<serenity::Cache>,
     pub http: Arc<serenity::Http>,
@@ -218,6 +223,28 @@ pub(crate) async fn remove_panel(db: &DatabaseConnection, guild_id: i64) -> anyh
     Ok(result.rows_affected > 0)
 }
 
+/// Deletes the guild's panel record ONLY if it still points at
+/// `message_id`. Returns whether a row was removed.
+///
+/// This is the F32 cleanup path: a refresh works on a possibly stale
+/// snapshot (the sweep paces ~1 s per panel over hundreds of rows), and
+/// `/panel create` may have concurrently replaced the record with a fresh
+/// message. An unconditional delete-by-guild would then destroy the fresh
+/// record and orphan the new panel — so the delete is keyed on the exact
+/// message that 404'd.
+pub(crate) async fn remove_panel_if_message(
+    db: &DatabaseConnection,
+    guild_id: i64,
+    message_id: i64,
+) -> anyhow::Result<bool> {
+    let result = leaderboard_panels::Entity::delete_many()
+        .filter(leaderboard_panels::Column::GuildId.eq(guild_id))
+        .filter(leaderboard_panels::Column::MessageId.eq(message_id))
+        .exec(db)
+        .await?;
+    Ok(result.rows_affected > 0)
+}
+
 /// Marks a successful render (`updated_at` doubles as "last successful
 /// render" for the sweep). A vanished row is a no-op, not an error.
 pub(crate) async fn touch_panel(db: &DatabaseConnection, guild_id: i64) -> anyhow::Result<()> {
@@ -245,6 +272,10 @@ pub(crate) enum PanelFate {
     Updated,
     /// The target channel/message is gone (404) — record removed (F32).
     RemovedDead,
+    /// The target was gone (404) but the record no longer points at it —
+    /// `/panel create` replaced the panel while this refresh was in flight.
+    /// The fresh record is left untouched.
+    Superseded,
     /// Transient failure (network, permissions) — record kept for retry.
     KeptAfterError,
 }
@@ -279,20 +310,34 @@ pub(crate) fn classify_error(error: &serenity::Error) -> EditFailure {
 /// Applies an edit attempt's outcome to the DB: success bumps
 /// `updated_at`, a dead target removes the record (F32), a transient
 /// failure keeps it untouched for the next signal/sweep.
+///
+/// Takes the panel model the refresh worked on so the dead-target delete is
+/// keyed on the exact message that 404'd — a record concurrently replaced
+/// by `/panel create` survives ([`PanelFate::Superseded`]).
 pub(crate) async fn settle_refresh(
     db: &DatabaseConnection,
-    guild_id: i64,
+    panel: &leaderboard_panels::Model,
     outcome: Result<(), EditFailure>,
 ) -> anyhow::Result<PanelFate> {
+    let guild_id = panel.guild_id;
     match outcome {
         Ok(()) => {
             touch_panel(db, guild_id).await?;
             Ok(PanelFate::Updated)
         }
         Err(EditFailure::DeadTarget) => {
-            remove_panel(db, guild_id).await?;
-            log::info!("Removed panel record for guild {guild_id}: target channel/message is gone (F32)");
-            Ok(PanelFate::RemovedDead)
+            if remove_panel_if_message(db, guild_id, panel.message_id).await? {
+                log::info!(
+                    "Removed panel record for guild {guild_id}: target channel/message is gone (F32)"
+                );
+                Ok(PanelFate::RemovedDead)
+            } else {
+                log::info!(
+                    "Panel record for guild {guild_id} was replaced while refreshing message {}: keeping the fresh record",
+                    panel.message_id
+                );
+                Ok(PanelFate::Superseded)
+            }
         }
         Err(EditFailure::Transient) => Ok(PanelFate::KeptAfterError),
     }
@@ -309,10 +354,10 @@ async fn guild_display_name(
     guild_id: serenity::GuildId,
     locale: &LanguageIdentifier,
 ) -> String {
-    if let Some(cache) = cache_http.cache() {
-        if let Some(guild) = cache.guild(guild_id) {
-            return guild.name.to_string();
-        }
+    if let Some(cache) = cache_http.cache()
+        && let Some(guild) = cache.guild(guild_id)
+    {
+        return guild.name.to_string();
     }
     match guild_id.to_partial_guild(cache_http).await {
         Ok(guild) => guild.name.to_string(),
@@ -359,7 +404,7 @@ pub(crate) async fn refresh_panel(
         u64::try_from(panel.message_id),
     ) else {
         // Ids that cannot be snowflakes can never resolve: dead by definition.
-        return settle_refresh(db, panel.guild_id, Err(EditFailure::DeadTarget)).await;
+        return settle_refresh(db, panel, Err(EditFailure::DeadTarget)).await;
     };
     let guild_id = serenity::GuildId::new(guild);
 
@@ -388,7 +433,7 @@ pub(crate) async fn refresh_panel(
             Err(failure)
         }
     };
-    settle_refresh(db, panel.guild_id, outcome).await
+    settle_refresh(db, panel, outcome).await
 }
 
 /// Debounced-path refresh: loads the guild's record (it may have been
@@ -442,6 +487,47 @@ async fn reconcile_all(
     );
 }
 
+/// Holds at most one in-flight sweep task. Sweeps run on their OWN task so
+/// the updater loop keeps servicing debounced signals while a sweep paces
+/// through hundreds of panels (F29: the sweep is a safety net and must not
+/// starve the primary event-driven path). A sweep tick that lands while the
+/// previous sweep is still running is skipped, never queued.
+pub(crate) struct SweepSlot(Option<tokio::task::JoinHandle<()>>);
+
+impl SweepSlot {
+    pub(crate) fn new() -> Self {
+        Self(None)
+    }
+
+    /// True while a previously started sweep is still running.
+    pub(crate) fn busy(&self) -> bool {
+        self.0.as_ref().is_some_and(|task| !task.is_finished())
+    }
+
+    /// Spawns `sweep` unless one is still in flight; reports whether it
+    /// actually started.
+    pub(crate) fn try_start<F>(&mut self, sweep: F) -> bool
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        if self.busy() {
+            return false;
+        }
+        self.0 = Some(tokio::spawn(sweep));
+        true
+    }
+
+    /// Aborts and drains any in-flight sweep (shutdown path: covers the
+    /// channel-closed exit, where the shutdown flag never flips and the
+    /// sweep would otherwise keep pacing to the end).
+    pub(crate) async fn shutdown(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
 /// The background task: reacts to debounced per-guild signals (F29) and
 /// runs the periodic reconciliation sweep. Exits when the shutdown watch
 /// flips to `true` or either channel closes (ADR 0009).
@@ -455,6 +541,7 @@ pub async fn run(
         "Panel updater started (debounce {DEBOUNCE:?}, sweep every {SWEEP_INTERVAL:?})"
     );
     let mut queue = DebounceQueue::new(DEBOUNCE);
+    let mut sweep_slot = SweepSlot::new();
     let mut sweep = tokio::time::interval_at(
         tokio::time::Instant::now() + INITIAL_SWEEP_DELAY,
         SWEEP_INTERVAL,
@@ -479,7 +566,19 @@ pub async fn run(
                 Some(guild_id) => queue.signal(guild_id, Instant::now()),
                 None => break, // every command handle dropped — shutting down
             },
-            _ = sweep.tick() => reconcile_all(&db, &cache_http, &shutdown).await,
+            // The sweep runs on its own task (SweepSlot) so this loop keeps
+            // servicing debounced signals while it paces through the panels.
+            _ = sweep.tick() => {
+                let started = sweep_slot.try_start({
+                    let db = db.clone();
+                    let cache_http = cache_http.clone();
+                    let shutdown = shutdown.clone();
+                    async move { reconcile_all(&db, &cache_http, &shutdown).await }
+                });
+                if !started {
+                    log::warn!("Panel sweep tick skipped: previous sweep still running");
+                }
+            }
             _ = tokio::time::sleep_until(wake), if deadline.is_some() => {
                 for guild_id in queue.take_due(Instant::now()) {
                     match refresh_guild(&db, &cache_http, guild_id).await {
@@ -492,6 +591,7 @@ pub async fn run(
             }
         }
     }
+    sweep_slot.shutdown().await;
     log::info!("Panel updater stopped");
 }
 
@@ -667,15 +767,35 @@ mod tests {
         touch_panel(&db, 999).await.expect("touch missing row");
     }
 
+    // --- conditional delete (stale-refresh guard) ---
+
+    #[tokio::test]
+    async fn remove_panel_if_message_only_deletes_the_matching_record() {
+        let db = fresh_db().await;
+        save_panel(&db, 1, 100, 200).await.expect("save");
+
+        // A stale message id (the record was replaced) must not delete.
+        assert!(
+            !remove_panel_if_message(&db, 1, 999).await.expect("mismatch"),
+            "mismatched message_id must leave the record alone"
+        );
+        assert!(get_panel(&db, 1).await.expect("get").is_some());
+
+        // The matching message id does delete.
+        assert!(remove_panel_if_message(&db, 1, 200).await.expect("match"));
+        assert!(get_panel(&db, 1).await.expect("get").is_none());
+    }
+
     // --- settle_refresh (F31/F32 record lifecycle) ---
 
     #[tokio::test]
     async fn successful_refresh_touches_the_record() {
         let db = fresh_db().await;
         insert_stale_panel(&db, 1).await;
-        let before = get_panel(&db, 1).await.expect("get").expect("row").updated_at;
+        let panel = get_panel(&db, 1).await.expect("get").expect("row");
+        let before = panel.updated_at;
 
-        let fate = settle_refresh(&db, 1, Ok(())).await.expect("settle");
+        let fate = settle_refresh(&db, &panel, Ok(())).await.expect("settle");
         assert_eq!(fate, PanelFate::Updated);
         let after = get_panel(&db, 1).await.expect("get").expect("row").updated_at;
         assert!(after > before);
@@ -685,8 +805,9 @@ mod tests {
     async fn dead_target_removes_the_record_f32() {
         let db = fresh_db().await;
         insert_stale_panel(&db, 1).await;
+        let panel = get_panel(&db, 1).await.expect("get").expect("row");
 
-        let fate = settle_refresh(&db, 1, Err(EditFailure::DeadTarget))
+        let fate = settle_refresh(&db, &panel, Err(EditFailure::DeadTarget))
             .await
             .expect("settle");
         assert_eq!(fate, PanelFate::RemovedDead);
@@ -697,17 +818,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dead_target_on_a_replaced_record_keeps_the_fresh_panel() {
+        let db = fresh_db().await;
+        insert_stale_panel(&db, 1).await; // (channel 100, message 200)
+        let stale = get_panel(&db, 1).await.expect("get").expect("row");
+
+        // Concurrent `/panel create` replaced the record while a refresh of
+        // the OLD message (about to 404) was in flight.
+        save_panel(&db, 1, 111, 222).await.expect("replace");
+
+        let fate = settle_refresh(&db, &stale, Err(EditFailure::DeadTarget))
+            .await
+            .expect("settle");
+        assert_eq!(fate, PanelFate::Superseded);
+        let fresh = get_panel(&db, 1).await.expect("get").expect("row");
+        assert_eq!(
+            (fresh.channel_id, fresh.message_id),
+            (111, 222),
+            "the freshly created panel record must survive a stale 404"
+        );
+    }
+
+    #[tokio::test]
     async fn transient_failure_keeps_the_record_untouched() {
         let db = fresh_db().await;
         insert_stale_panel(&db, 1).await;
-        let before = get_panel(&db, 1).await.expect("get").expect("row").updated_at;
+        let panel = get_panel(&db, 1).await.expect("get").expect("row");
+        let before = panel.updated_at;
 
-        let fate = settle_refresh(&db, 1, Err(EditFailure::Transient))
+        let fate = settle_refresh(&db, &panel, Err(EditFailure::Transient))
             .await
             .expect("settle");
         assert_eq!(fate, PanelFate::KeptAfterError);
         let row = get_panel(&db, 1).await.expect("get").expect("row");
         assert_eq!(row.updated_at, before, "no touch on failure — retried next time");
+    }
+
+    // --- sweep slot (sweeps must not block the signal loop) ---
+
+    #[tokio::test]
+    async fn sweep_slot_runs_one_sweep_at_a_time_and_skips_overlapping_ticks() {
+        let mut slot = SweepSlot::new();
+        assert!(!slot.busy(), "fresh slot is idle");
+
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        assert!(slot.try_start(async move {
+            let _ = release_rx.await;
+            let _ = done_tx.send(());
+        }));
+        assert!(slot.busy(), "sweep is in flight");
+
+        // A tick landing mid-sweep must be skipped, not queued.
+        assert!(!slot.try_start(async {}), "overlapping sweep must be refused");
+
+        // Once the sweep finishes, the next tick starts a new one.
+        release_tx.send(()).expect("release the sweep");
+        done_rx.await.expect("sweep completed");
+        while slot.busy() {
+            tokio::task::yield_now().await;
+        }
+        assert!(slot.try_start(async {}), "slot is reusable after completion");
+        slot.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sweep_slot_shutdown_aborts_an_in_flight_sweep() {
+        let mut slot = SweepSlot::new();
+        // A sweep that would never finish on its own (e.g. channel-closed
+        // shutdown where the watch flag never flips).
+        assert!(slot.try_start(std::future::pending()));
+        assert!(slot.busy());
+
+        slot.shutdown().await; // must abort and return, not hang
+        assert!(!slot.busy(), "slot drained after shutdown");
     }
 
     // --- signal handle ---

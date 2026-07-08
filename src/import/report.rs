@@ -15,9 +15,11 @@ pub struct DefaultedField {
     pub field: &'static str,
 }
 
-/// One trophy field whose legacy value was PRESENT but unusable (non-numeric
-/// snowflake, out-of-range timestamp, ...); imported as NULL / synthetic
-/// default instead. Defense path — 0 expected in production (spec principle 3:
+/// One legacy field whose value was PRESENT but unusable (non-numeric
+/// snowflake, out-of-range timestamp, value/index/requirement outside its
+/// schema CHECK range, ...); imported as NULL / clamped / dropped instead of
+/// aborting the transaction. `legacy_id` names the trophy id, setting key or
+/// reward role id. Defense path — 0 expected in production (spec principle 3:
 /// anomalies are reported, never silently fixed).
 #[derive(Debug, Clone, Serialize)]
 pub struct InvalidFieldValue {
@@ -26,6 +28,17 @@ pub struct InvalidFieldValue {
     pub field: &'static str,
     /// The unusable legacy value, verbatim.
     pub value: String,
+}
+
+/// One root `guilds` entry whose value is neither a guild object nor a
+/// `/forgetme` tombstone; skipped, with the verbatim value kept so the
+/// pre-cutover human review (migration-import.md Phase 0) can inspect it
+/// without excavating the legacy blob.
+#[derive(Debug, Clone, Serialize)]
+pub struct CorruptGuild {
+    pub key: String,
+    /// The verbatim non-object, non-tombstone legacy value.
+    pub value: serde_json::Value,
 }
 
 /// One non-integer legacy trophy value rounded half-away-from-zero.
@@ -118,7 +131,7 @@ pub struct ScoreMismatch {
 pub struct ImportReport {
     // Phase 0
     pub tombstoned_guilds: Vec<String>,
-    pub corrupt_guilds: Vec<String>,
+    pub corrupt_guilds: Vec<CorruptGuild>,
     // Phase 1
     pub bot_stats_rows: u64,
     // Phase 2
@@ -163,6 +176,18 @@ impl ImportReport {
         (self.downloaded_images.len() + self.expired_image_urls.len()) as u64
     }
 
+    /// Distinct trophies with at least one defaulted field.
+    /// `defaulted_fields` is per-FIELD (a trophy missing e.g. both `creator`
+    /// and `signed` contributes two entries); the spec's expected count (43
+    /// incomplete trophies, migration-import.md Phase 3) counts TROPHIES.
+    pub fn defaulted_trophies(&self) -> u64 {
+        self.defaulted_fields
+            .iter()
+            .map(|d| (d.guild_id, d.legacy_id.as_str()))
+            .collect::<std::collections::HashSet<_>>()
+            .len() as u64
+    }
+
     /// `(metric, measured, expected)` rows; expected values are the counts
     /// measured against the production snapshot (migration-import.md Phase 7).
     pub fn summary_rows(&self) -> Vec<(&'static str, u64, u64)> {
@@ -171,19 +196,24 @@ impl ImportReport {
             ("tombstoned_guilds", self.tombstoned_guilds.len() as u64, 5),
             ("corrupt_guilds", self.corrupt_guilds.len() as u64, 0),
             ("trophies", self.trophies, 10_853),
+            ("defaulted_trophies", self.defaulted_trophies(), 43),
             ("invalid_field_values", self.invalid_fields.len() as u64, 0),
             ("rounded_values", self.rounded_values.len() as u64, 44),
             ("renamed_trophies", self.renamed_trophies.len() as u64, 643),
             ("awards_inserted", self.awards_inserted, 60_554),
             ("orphaned_awards", self.orphaned_awards.len() as u64, 0),
+            ("empty_award_users", self.empty_award_users, 1_284),
             ("role_rewards_after_dedupe", self.role_rewards, 275),
             ("deduped_rewards_removed", self.deduped_rewards.len() as u64, 12),
             ("panels", self.panels, 461),
+            ("settings_rows", self.settings_rows, 162),
             ("score_mismatches", self.score_mismatches.len() as u64, 133),
             ("score_mismatches_legacy_drift", self.drift_mismatches(), 51),
             ("score_mismatches_rounding", self.rounding_mismatches(), 82),
+            ("local_images_kept", self.local_images_kept, 2_493),
             ("missing_image_files", self.missing_image_files.len() as u64, 200),
             ("url_images", self.url_images(), 195),
+            ("orphan_disk_files", self.orphan_disk_files.len() as u64, 278),
         ]
     }
 

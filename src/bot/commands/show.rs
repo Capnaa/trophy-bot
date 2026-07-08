@@ -140,19 +140,28 @@ pub async fn show(
     trophy: String,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("guild_only command invoked outside a guild"))?;
+    let guild_id = util::require_guild_id(&ctx)?;
     let db = &ctx.data().db;
 
-    let Some(model) = resolver::resolve_trophy(db, guild_id.get() as i64, &trophy).await? else {
-        return util::reply_error(
-            ctx,
-            i18n::t_args(&locale, "show-error-not-found", &[("input", trophy.into())]),
-            true,
-        )
-        .await;
+    let Some(model) = resolver::resolve_trophy_or_reply(
+        ctx,
+        guild_id.get() as i64,
+        &trophy,
+        "show-error-not-found",
+    )
+    .await?
+    else {
+        return Ok(());
     };
+
+    // Acknowledge before the slow path: the dedication lookup below can cost
+    // up to TWO sequential HTTP round trips (guild member fetch + global user
+    // fetch for departed users in mode 1) plus a disk read for the image —
+    // enough to breach the 3-second interaction window under API latency
+    // (same rationale as /leaderboard and /panel create; legacy /show always
+    // deferred). Deferred AFTER the resolver so the not-found error above
+    // stays a plain ephemeral reply.
+    ctx.defer().await?;
 
     // Dedication line: fetch live info only when the display mode needs it.
     let mode = settings::get_setting(db, guild_id.get() as i64, Setting::DedicationDisplay).await?;
@@ -354,6 +363,27 @@ mod tests {
             ImagePlan::Url(DEFAULT_IMAGE_URL.to_string())
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Regression guard: the handler must acknowledge (defer) BEFORE the
+    /// live member/user lookups — those are up to two sequential HTTP calls
+    /// and can exceed the 3-second interaction window ("no hanging
+    /// interactions"). Serenity types aren't mockable here, so this checks
+    /// the statement order in the source itself (same pattern as
+    /// `src/bot/buttons.rs`).
+    #[test]
+    fn handler_defers_before_live_member_lookups() {
+        let src = include_str!("show.rs");
+        let handler = src.split("pub async fn show").nth(1).expect("show handler exists");
+        let defer = handler.find("ctx.defer()").expect("handler must defer");
+        let lookup = handler
+            .find("live_member_info(")
+            .expect("handler resolves the dedication member");
+        let send = handler.find("ctx.send(").expect("handler sends the reply");
+        assert!(
+            defer < lookup && defer < send,
+            "defer ({defer}) must precede the member lookup ({lookup}) and the send ({send})"
+        );
     }
 
     // --- i18n catalog ---

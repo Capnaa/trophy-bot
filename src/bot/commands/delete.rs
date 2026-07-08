@@ -9,15 +9,13 @@
 //!   attempts) with failures logged, not swallowed.
 //! - F12 (shared): trophy resolved by exact normalized name with autocomplete
 //!   (`src/bot/resolver.rs`) — no numeric-ID branch, no path traversal.
-//!
-//! TODO(follow-up, blocked on C16): the spec's Rust target
-//! (docs/specs/commands-trophy-management.md §/delete, "Add a confirmation
-//! button for destructive delete") is intentionally deferred — the
-//! implementation plan scopes this batch (C9) to F10 only, and the button
-//! interaction infrastructure lands with C16 (`/forgetme`). Once C16's
-//! button infra exists, wire a confirm/cancel step in front of
-//! `delete_trophy` here. Until then /delete matches legacy behavior
-//! (no confirmation step).
+//! - Spec Rust target: the destructive delete is CONFIRMED with a
+//!   confirm/cancel button pair (built on the C16 button infrastructure in
+//!   `src/bot/buttons.rs`, which also runs the actual deletion on confirm).
+//!   The handler below only resolves the trophy and issues the warning; only
+//!   the invoker may press the buttons, and they expire like /forgetme's.
+//!   Legacy /delete was a one-shot un-confirmed hard delete — the added
+//!   confirmation is a documented intentional delta (rust-parity-plan.md §4).
 //!
 //! Score needs no fixup (ADR 0006: never stored — every reader recomputes
 //! `SUM(value)`, which drops automatically once the awards cascade away).
@@ -29,12 +27,12 @@
 
 use poise::serenity_prelude as serenity;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect, TransactionSession,
-    TransactionTrait,
+    ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QuerySelect,
+    TransactionSession, TransactionTrait,
 };
 use uuid::Uuid;
 
-use crate::bot::{images, resolver, reward_apply, util, Context, Error};
+use crate::bot::{buttons, resolver, util, Context, Error};
 use crate::entities::{trophies, user_trophies};
 use crate::i18n;
 
@@ -71,8 +69,20 @@ pub(crate) async fn delete_trophy<C: TransactionTrait>(
     Ok(affected)
 }
 
+/// Awards currently referencing `trophy_id` (what the FK cascade will wipe),
+/// shown in the confirmation warning so the invoker knows the blast radius.
+pub(crate) async fn award_count(
+    db: &impl ConnectionTrait,
+    trophy_id: Uuid,
+) -> Result<u64, sea_orm::DbErr> {
+    user_trophies::Entity::find()
+        .filter(user_trophies::Column::TrophyId.eq(trophy_id))
+        .count(db)
+        .await
+}
+
 /// Delete a trophy from your server.
-#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD")]
+#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD", required_permissions = "MANAGE_GUILD")]
 pub async fn delete(
     ctx: Context<'_>,
     #[description = "Name of the trophy to delete"]
@@ -80,58 +90,70 @@ pub async fn delete(
     trophy: String,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("guild_only command invoked outside a guild"))?;
+    let guild_id = util::require_guild_id(&ctx)?;
     let db = &ctx.data().db;
 
-    let Some(model) = resolver::resolve_trophy(db, guild_id.get() as i64, &trophy).await? else {
-        return util::reply_error(
-            ctx,
-            i18n::t_args(&locale, "delete-error-not-found", &[("input", trophy.into())]),
-            true,
-        )
-        .await;
+    let Some(model) = resolver::resolve_trophy_or_reply(
+        ctx,
+        guild_id.get() as i64,
+        &trophy,
+        "delete-error-not-found",
+    )
+    .await?
+    else {
+        return Ok(());
     };
 
-    let affected = delete_trophy(db, model.id).await?;
+    // Confirmation step (spec Rust target): nothing is deleted here. The
+    // warning states how many awards the cascade will remove; the buttons
+    // encode the invoker, the trophy UUID and the issue time, and are
+    // consumed by `src/bot/buttons.rs::handle_trophy_delete`.
+    let awards = award_count(db, model.id).await?;
+    let issued_at = chrono::Utc::now().timestamp();
 
-    // F10: unlink the image only when the trophy actually has one. `remove`
-    // logs failures (other than "already gone") instead of swallowing them.
-    if let Some(image) = &model.image {
-        images::remove(image);
-    }
-
-    // Reply first (the delete is committed), then apply reward roles: the
-    // Discord-side work can be slow and must never push the interaction past
-    // its acknowledgement deadline.
-    let description = i18n::t_args(
-        &locale,
-        "delete-success",
-        &[
-            ("emoji", model.emoji.clone().into()),
-            ("name", model.name.clone().into()),
-        ],
-    );
     let embed = serenity::CreateEmbed::new()
-        .colour(util::COLOR_SUCCESS)
-        .description(description);
-    util::reply_embed(ctx, embed, false).await?;
+        .title(i18n::t_args(
+            &locale,
+            "delete-confirm-title",
+            &[("emoji", model.emoji.clone().into()), ("name", model.name.clone().into())],
+        ))
+        .description(i18n::t_args(
+            &locale,
+            "delete-confirm-description",
+            &[
+                ("awards", awards.into()),
+                ("seconds", buttons::CONFIRM_TIMEOUT_SECS.into()),
+            ],
+        ))
+        .colour(util::COLOR_ERROR);
 
-    // §2 reward engine: awaited, idempotent, per-user failures logged — an
-    // engine hiccup after the committed delete must not turn the already-sent
-    // success into an error, nor stop the remaining users from recomputing.
-    for user_id in affected {
-        if let Err(err) =
-            reward_apply::apply_rewards(&ctx, guild_id, serenity::UserId::new(user_id as u64))
-                .await
-        {
-            log::error!(
-                "reward recompute failed after /delete (guild={}, user={user_id}): {err:#}",
-                guild_id.get()
-            );
-        }
-    }
+    let invoker = ctx.author().id.get();
+    let components = vec![serenity::CreateActionRow::Buttons(vec![
+        serenity::CreateButton::new(buttons::delete_custom_id(
+            buttons::DeleteButton::Confirm,
+            issued_at,
+            invoker,
+            model.id,
+        ))
+        .style(serenity::ButtonStyle::Danger)
+        .emoji('🗑')
+        .label(i18n::t(&locale, "delete-button-confirm")),
+        serenity::CreateButton::new(buttons::delete_custom_id(
+            buttons::DeleteButton::Cancel,
+            issued_at,
+            invoker,
+            model.id,
+        ))
+        .style(serenity::ButtonStyle::Secondary)
+        .label(i18n::t(&locale, "delete-button-cancel")),
+    ])];
+
+    ctx.send(
+        poise::CreateReply::default()
+            .embed(embed)
+            .components(components),
+    )
+    .await?;
     Ok(())
 }
 
@@ -308,6 +330,48 @@ mod tests {
         assert_eq!(configured, vec![500], "stale role stays removable");
     }
 
+    // --- award_count (confirmation blast radius) ---
+
+    #[tokio::test]
+    async fn award_count_counts_every_copy_of_the_trophy_only() {
+        let db = fresh_db().await;
+        insert_guild(&db, 1).await;
+        let doomed = insert_trophy(&db, 1, "Doomed", 10, None).await;
+        let other = insert_trophy(&db, 1, "Other", 5, None).await;
+
+        assert_eq!(award_count(&db, doomed.id).await.unwrap(), 0);
+
+        award(&db, 1, 42, doomed.id).await;
+        award(&db, 1, 42, doomed.id).await; // duplicates count individually
+        award(&db, 1, 43, doomed.id).await;
+        award(&db, 1, 99, other.id).await; // other trophy → excluded
+
+        assert_eq!(award_count(&db, doomed.id).await.unwrap(), 3);
+    }
+
+    /// Regression guard for the confirmation step (spec Rust target): the
+    /// slash-command handler must only WARN — the actual deletion runs from
+    /// the button handler in `src/bot/buttons.rs` after an explicit confirm.
+    #[test]
+    fn slash_handler_never_deletes_directly() {
+        let src = include_str!("delete.rs");
+        let handler = src
+            .split("pub async fn delete")
+            .nth(1)
+            .expect("delete handler exists");
+        // Cut at the end of the handler function (next top-level item).
+        let handler = &handler[..handler.find("\n#[cfg(test)]").unwrap_or(handler.len())];
+        let forbidden = concat!("delete_", "trophy(");
+        assert!(
+            !handler.contains(forbidden),
+            "/delete must not hard-delete without the button confirmation"
+        );
+        assert!(
+            handler.contains("delete_custom_id"),
+            "/delete must issue the confirmation buttons"
+        );
+    }
+
     // --- i18n catalog ---
 
     #[test]
@@ -324,5 +388,35 @@ mod tests {
         let not_found =
             i18n::t_args(&locale, "delete-error-not-found", &[("input", "Nope".into())]);
         assert!(not_found.contains("Nope"), "{not_found}");
+    }
+
+    #[test]
+    fn catalog_has_confirmation_messages() {
+        let locale = i18n::resolve(None);
+
+        let title = i18n::t_args(
+            &locale,
+            "delete-confirm-title",
+            &[("emoji", "🏅".into()), ("name", "Gold".into())],
+        );
+        assert!(title.contains("Gold"), "{title}");
+
+        // The warning states the blast radius and the expiry window, with
+        // singular/plural/zero award counts all rendering.
+        for (awards, needle) in [(0i64, "nobody"), (1, "1 existing award"), (3, "3 existing awards")]
+        {
+            let description = i18n::t_args(
+                &locale,
+                "delete-confirm-description",
+                &[("awards", awards.into()), ("seconds", 60.into())],
+            );
+            let plain: String = description.replace(['\u{2068}', '\u{2069}'], "");
+            assert!(plain.contains(needle), "awards={awards}: {plain}");
+            assert!(plain.contains("60"), "expiry shown: {plain}");
+        }
+
+        for key in ["delete-button-confirm", "delete-button-cancel"] {
+            assert_ne!(i18n::t(&locale, key), key, "missing Fluent key {key}");
+        }
     }
 }

@@ -17,6 +17,7 @@ use crate::i18n;
     slash_command,
     guild_only,
     default_member_permissions = "MANAGE_GUILD",
+    required_permissions = "MANAGE_GUILD",
     subcommands("add", "list", "remove")
 )]
 pub async fn permissions(_ctx: Context<'_>) -> Result<(), Error> {

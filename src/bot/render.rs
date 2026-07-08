@@ -371,6 +371,24 @@ where
     resolved
 }
 
+/// Resolves membership for every id not already in `membership` (single
+/// hash lookup per id via the entry API) and stores the result. Used to top
+/// up the map for the displayed page when name formats 1-3 need member data.
+pub(crate) async fn fill_missing_membership<R, Fut>(
+    membership: &mut HashMap<i64, Membership>,
+    ids: impl IntoIterator<Item = i64>,
+    mut resolve: R,
+) where
+    R: FnMut(i64) -> Fut,
+    Fut: std::future::Future<Output = Membership>,
+{
+    for user_id in ids {
+        if let std::collections::hash_map::Entry::Vacant(slot) = membership.entry(user_id) {
+            slot.insert(resolve(user_id).await);
+        }
+    }
+}
+
 /// How many visible users must be confirmed to render `requested_page`: a
 /// full page's worth up to that page, clamped by the (unfiltered) board
 /// length — filtering can only shrink the real last page below this bound.
@@ -421,12 +439,11 @@ pub async fn render_leaderboard(
     // Name formats 1-3 need member data for the displayed page only (≤ 10
     // extra lookups); anything still unresolved renders as a mention (F13).
     if format != LeaderboardFormat::Mention {
-        for user_id in page_slice_ids(&board, &membership, hide_quit_users, requested_page) {
-            if !membership.contains_key(&user_id) {
-                let resolved = lookup_membership(cache_http, guild_id, user_id).await;
-                membership.insert(user_id, resolved);
-            }
-        }
+        let page_ids = page_slice_ids(&board, &membership, hide_quit_users, requested_page);
+        fill_missing_membership(&mut membership, page_ids, |user_id| {
+            lookup_membership(cache_http, guild_id, user_id)
+        })
+        .await;
     }
     let view = build_view(
         locale,
@@ -618,6 +635,25 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert_eq!(map.get(&0), Some(&Membership::Absent));
         assert_eq!(map.get(&-5), Some(&Membership::Absent));
+    }
+
+    #[tokio::test]
+    async fn fill_missing_membership_only_resolves_absent_entries() {
+        // Users 1 and 2 were already resolved by the quit-user walk; only 3
+        // and 4 cost a lookup, and existing entries are never overwritten.
+        let mut membership = HashMap::from([(1, Membership::Absent), (2, present("a", None, "a#0"))]);
+        let calls = std::cell::Cell::new(0usize);
+        fill_missing_membership(&mut membership, [1, 2, 3, 4], |id| {
+            calls.set(calls.get() + 1);
+            assert!(id == 3 || id == 4, "already-resolved users must not be re-looked-up");
+            ready(Membership::Unknown)
+        })
+        .await;
+        assert_eq!(calls.get(), 2);
+        assert_eq!(membership.get(&1), Some(&Membership::Absent));
+        assert_eq!(membership.get(&2), Some(&present("a", None, "a#0")));
+        assert_eq!(membership.get(&3), Some(&Membership::Unknown));
+        assert_eq!(membership.get(&4), Some(&Membership::Unknown));
     }
 
     #[test]

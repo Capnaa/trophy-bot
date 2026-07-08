@@ -13,9 +13,10 @@
 
 use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
-use crate::bot::Context;
+use crate::bot::{util, Context, Error};
 use crate::domain::normalize::normalize_name;
 use crate::entities::trophies;
+use crate::i18n;
 
 /// Discord's hard cap on autocomplete choices.
 pub const MAX_CHOICES: usize = 25;
@@ -33,6 +34,31 @@ pub async fn resolve_trophy(
         .filter(trophies::Column::NormalizedName.eq(normalize_name(input)))
         .one(db)
         .await
+}
+
+/// [`resolve_trophy`] plus the shared not-found handling: when nothing
+/// matches, replies with the caller's localized `<not_found_key>` message
+/// (an ephemeral error carrying the raw input as `$input`) and returns
+/// `Ok(None)` — the caller just returns `Ok(())`. Keeps the six identical
+/// resolve-or-error blocks (/award /revoke /delete /edit /details /show) in
+/// one place.
+pub async fn resolve_trophy_or_reply(
+    ctx: Context<'_>,
+    guild_id: i64,
+    input: &str,
+    not_found_key: &str,
+) -> Result<Option<trophies::Model>, Error> {
+    let model = resolve_trophy(&ctx.data().db, guild_id, input).await?;
+    if model.is_none() {
+        let locale = util::locale(&ctx);
+        util::reply_error(
+            ctx,
+            i18n::t_args(&locale, not_found_key, &[("input", input.to_string().into())]),
+            true,
+        )
+        .await?;
+    }
+    Ok(model)
 }
 
 /// Pure choice filter behind [`autocomplete_trophy`]: keeps the trophies whose

@@ -74,7 +74,7 @@ All slash commands run through `events/command.js`:
 - DISCORD_COMMANDS_DOCUMENTATION.md and CLAUDE.md describe "complete data deletion"; the real implementation writes a `-1` tombstone instead of deleting the key.
 - Neither doc mentions the missing cancel button, the dead `forgetmenope` handler, or that image deletion errors are silently swallowed.
 
-**Rust target:** Keep owner-only gate and explicit button confirmation, but add a real Cancel button and give non-owners an ephemeral rejection message. Perform a true delete: cascade-delete guild rows (guilds → trophies → user_trophies → settings → rewards → panels via FK CASCADE) inside a transaction, delete image files with logged errors (via `log`), then leave the guild. No tombstones.
+**Rust target:** Keep owner-only gate and explicit button confirmation, but add a real Cancel button and give non-owners an ephemeral rejection message. Perform a true delete: cascade-delete guild rows (guilds → trophies → user_trophies → settings → rewards → panels via FK CASCADE) inside a transaction, delete image files with logged errors (via `log`), then leave the guild. No tombstones. **Intentional delta** (rust-parity-plan.md §4.8): the confirmation buttons carry their issue timestamp in the custom ids and expire after 60 seconds — a stale press replaces the warning with an "expired" notice and removes the buttons (legacy buttons never expired); the window is stated in the warning embed. Button presses are acknowledged (deferred update) before the owner fetch and the purge transaction so the 3-second component deadline is never at risk.
 
 ## /help
 

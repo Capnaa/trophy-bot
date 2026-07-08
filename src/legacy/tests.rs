@@ -75,7 +75,11 @@ fn trophy_map_keeps_current_counter_separate_from_definitions() {
     let map: HashMap<String, TrophyEntry> = serde_json::from_str(json).expect("parse trophy map");
     let guild = LegacyGuild { trophies: map, ..Default::default() };
 
-    assert_eq!(guild.trophy_counter(), Some(3));
+    assert_eq!(guild.trophies.len(), 3, "counter entry is kept in the raw map");
+    assert!(
+        matches!(guild.trophies.get("current"), Some(TrophyEntry::Counter)),
+        "bare integer parses as the counter, not a trophy"
+    );
     let mut defs: Vec<(&str, &LegacyTrophy)> = guild.trophy_defs().collect();
     defs.sort_by_key(|(id, _)| *id);
     assert_eq!(defs.len(), 2);
@@ -215,6 +219,15 @@ fn legacy_url_enforces_read_only_mode() {
     assert_eq!(legacy_url("sqlite://db.sqlite?foo=1"), "sqlite://db.sqlite?foo=1&mode=ro");
     // An explicit caller-provided mode is respected.
     assert_eq!(legacy_url("sqlite://db.sqlite?mode=rwc"), "sqlite://db.sqlite?mode=rwc");
+}
+
+#[test]
+fn legacy_connection_disables_sqlx_statement_logging() {
+    // sea-orm defaults sqlx statement logging to INFO, which would interleave
+    // raw quick.db SQL with the import report even with DEBUG=false.
+    let options = legacy_connect_options("./json.sqlite");
+    assert!(!options.get_sqlx_logging(), "sqlx statement logging must be off");
+    assert_eq!(options.get_url(), "sqlite://./json.sqlite?mode=ro");
 }
 
 #[tokio::test]

@@ -44,6 +44,7 @@ impl GuildEntry {
         matches!(self, Self::Corrupt(_))
     }
 
+    #[cfg(test)]
     pub fn as_guild(&self) -> Option<&LegacyGuild> {
         match self {
             Self::Guild(guild) => Some(guild),
@@ -91,24 +92,18 @@ impl LegacyGuild {
     pub fn trophy_defs(&self) -> impl Iterator<Item = (&str, &LegacyTrophy)> {
         self.trophies.iter().filter_map(|(id, entry)| match entry {
             TrophyEntry::Trophy(trophy) => Some((id.as_str(), trophy.as_ref())),
-            TrophyEntry::Counter(_) => None,
-        })
-    }
-
-    /// The `"current"` next-id counter, if the guild has one.
-    pub fn trophy_counter(&self) -> Option<i64> {
-        self.trophies.values().find_map(|entry| match entry {
-            TrophyEntry::Counter(counter) => Some(*counter),
-            TrophyEntry::Trophy(_) => None,
+            TrophyEntry::Counter => None,
         })
     }
 }
 
 /// Value of the guild `trophies` map: every key is a trophy definition except
-/// `"current"`, which holds the next-id counter as a bare integer.
+/// `"current"`, which holds the next-id counter as a bare integer. The counter
+/// value itself is discarded: the new schema assigns fresh serial ids, so the
+/// importer only needs to know the entry is not a trophy definition.
 #[derive(Debug, Clone)]
 pub enum TrophyEntry {
-    Counter(i64),
+    Counter,
     Trophy(Box<LegacyTrophy>),
 }
 
@@ -119,8 +114,8 @@ pub enum TrophyEntry {
 impl<'de> Deserialize<'de> for TrophyEntry {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        if let Some(counter) = value.as_i64() {
-            return Ok(Self::Counter(counter));
+        if value.as_i64().is_some() {
+            return Ok(Self::Counter);
         }
         serde_json::from_value(value)
             .map(|trophy| Self::Trophy(Box::new(trophy)))

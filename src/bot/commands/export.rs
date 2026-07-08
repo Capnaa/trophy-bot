@@ -26,12 +26,9 @@ pub const EXPORT_FORMAT: &str = "trophy-bot-guild-export";
 pub const EXPORT_VERSION: u32 = 1;
 
 /// Export the bot's data
-#[poise::command(slash_command, guild_only, default_member_permissions = "ADMINISTRATOR")]
+#[poise::command(slash_command, guild_only, default_member_permissions = "ADMINISTRATOR", required_permissions = "ADMINISTRATOR")]
 pub async fn export(ctx: Context<'_>) -> Result<(), Error> {
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("/export invoked outside a guild"))?;
-    let guild_id = i64::try_from(guild_id.get())?;
+    let guild_id = util::require_guild_id(&ctx)?.get() as i64;
     let db = &ctx.data().db;
     let locale = util::locale(&ctx);
 

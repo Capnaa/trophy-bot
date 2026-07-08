@@ -89,4 +89,20 @@ mod tests {
     fn leaves_non_url_strings_unchanged() {
         assert_eq!(redacted_db_url("sqlite::memory:"), "sqlite::memory:");
     }
+
+    #[test]
+    fn redacts_user_without_password() {
+        assert_eq!(
+            redacted_db_url("postgres://alice@db.example.com/trophy"),
+            "postgres://***@db.example.com/trophy"
+        );
+    }
+
+    #[test]
+    fn redacted_output_never_contains_original_credentials() {
+        let url = "postgres://prod_user:hunter2@db.internal:5432/trophy";
+        let redacted = redacted_db_url(url);
+        assert!(!redacted.contains("prod_user"));
+        assert!(!redacted.contains("hunter2"));
+    }
 }

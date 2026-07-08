@@ -31,7 +31,6 @@ pub struct Data {
 pub type Error = anyhow::Error;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
-#[allow(dead_code)]
 pub struct Bot {
     client: Client,
     shard_start: u32,
@@ -95,6 +94,11 @@ impl Bot {
             .options(poise::FrameworkOptions {
                 commands: commands::all(),
                 on_error: |error| Box::pin(handle_framework_error(error)),
+                // rust-parity-plan §2: count SUCCESSFUL executions only.
+                // Poise invokes `post_command` only after the command action
+                // returned `Ok`, so failed runs never bump the counters
+                // (they are logged by `handle_framework_error` instead).
+                post_command: |ctx| Box::pin(record_command_run(ctx)),
                 event_handler: |ctx, event, framework, data| {
                     Box::pin(buttons::handle_event(ctx, event, framework, data))
                 },
@@ -106,7 +110,7 @@ impl Bot {
 
                     if let Some(guild_id) = test_guild_id {
                         guild_id.set_commands(&ctx.http, builders).await?;
-                        log::warn!("Sync commands in test guild {}", guild_id);
+                        log::info!("Sync commands in test guild {}", guild_id);
                     } else {
                         Command::set_global_commands(&ctx.http, builders).await?;
                         log::info!("Sync commands globally");
@@ -129,40 +133,118 @@ impl Bot {
             panel_shutdown,
         } = self;
 
+        // One-shot diagnostic: list what Discord actually registered. The
+        // JoinHandle is deliberately detached (harmless if dropped during
+        // shutdown), so every outcome — success AND failure — must be logged
+        // right here; a `?` would vanish with the discarded handle.
         let http = client.http.clone();
         tokio::task::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
-            if let Some(guild_id) = test_guild_id {
-                for command in http.get_guild_commands(guild_id).await? {
-                    log::warn!("Found guild command: {}", command.name);
-                }
+            let listing = if let Some(guild_id) = test_guild_id {
+                http.get_guild_commands(guild_id).await
             } else {
-                for command in http.get_global_commands().await? {
-                    log::warn!("Found global command: {}", command.name);
+                http.get_global_commands().await
+            };
+            match listing {
+                Ok(registered) => {
+                    let names: Vec<String> =
+                        registered.into_iter().map(|command| command.name).collect();
+                    log::info!(
+                        "Commands registered on Discord: {}",
+                        format_command_listing(&names)
+                    );
+                }
+                Err(error) => {
+                    log::error!("Failed to list registered commands after startup: {error:?}");
                 }
             }
-
-            Ok::<(), anyhow::Error>(())
         });
 
         log::info!("Starting bot");
         let shard_manager = client.shard_manager.clone();
-        let runner = tokio::task::spawn(async move {
+        let mut runner = tokio::task::spawn(async move {
             client
                 .start_shard_range(shard_start..shard_end, shard_total)
                 .await
         });
 
-        shutdown_signal().await?;
-        log::info!("Shutdown signal received, stopping shards");
-        // ADR 0009: background workers stop on the same signal.
+        let early_exit = until_shutdown_or_runner_exit(shutdown_signal(), &mut runner).await;
+        match &early_exit {
+            None => log::info!("Shutdown signal received, stopping shards"),
+            Some(_) => {
+                log::error!("Shard runner exited before any shutdown signal; shutting down")
+            }
+        }
+        // ADR 0009: background workers stop on the same signal (or on the
+        // runner dying early — otherwise the panel updater would keep
+        // sweeping a dead bot forever).
         let _ = panel_shutdown.send(true);
         shard_manager.shutdown_all().await;
         if let Err(join_error) = panel_task.await {
             log::error!("Panel updater task failed to join: {join_error}");
         }
-        runner.await?.map_err(|e| e.into())
+        let runner_result = match early_exit {
+            Some(result) => result,
+            None => runner.await,
+        };
+        runner_result?.map_err(|e| e.into())
+    }
+}
+
+/// Waits for a shutdown signal, but also notices the shard runner finishing
+/// on its own (invalid token, gateway boot failure) so the process exits and
+/// a supervisor can restart it instead of hanging in signal-wait forever with
+/// the panel updater still sweeping. Returns `Some(join_result)` when the
+/// runner exited first, `None` on a shutdown request. A failed signal
+/// listener is treated as a shutdown request (logged) so cleanup still runs.
+async fn until_shutdown_or_runner_exit<T>(
+    shutdown: impl std::future::Future<Output = Result<()>>,
+    runner: &mut tokio::task::JoinHandle<T>,
+) -> Option<std::result::Result<T, tokio::task::JoinError>> {
+    tokio::select! {
+        signal = shutdown => {
+            if let Err(error) = signal {
+                log::error!("Shutdown signal listener failed, stopping anyway: {error:?}");
+            }
+            None
+        }
+        result = runner => Some(result),
+    }
+}
+
+/// Renders the startup command-listing diagnostic: `N (a, b, c)` or `none`.
+fn format_command_listing(names: &[String]) -> String {
+    if names.is_empty() {
+        "none".to_owned()
+    } else {
+        format!("{} ({})", names.len(), names.join(", "))
+    }
+}
+
+/// `post_command` hook (rust-parity-plan §2): bump the success-only run
+/// counters for every command, keyed like the legacy dispatcher.
+async fn record_command_run(ctx: Context<'_>) {
+    let command = root_command_name(ctx.parent_commands(), ctx.command());
+    record_run_counters(&ctx.data().db, command).await;
+}
+
+/// Legacy parity: run counters are keyed by the TOP-LEVEL command name
+/// (`data.commands.${interaction.commandName}`, events/command.js), so
+/// subcommand invocations like `/rewards add` count under `rewards`.
+fn root_command_name<'a>(
+    parents: &'a [&'a poise::Command<Data, Error>],
+    invoked: &'a poise::Command<Data, Error>,
+) -> &'a str {
+    parents.first().map_or(invoked.name.as_str(), |root| root.name.as_str())
+}
+
+/// Bumps the `total` + per-command counters in `bot_stats`. Failures are
+/// logged and swallowed: a counter error must never surface to a user whose
+/// command already succeeded.
+async fn record_run_counters(db: &DatabaseConnection, command: &str) {
+    if let Err(error) = commands::stats::record_successful_run(db, command).await {
+        log::error!("Failed to record /{command} run in bot_stats: {error:?}");
     }
 }
 
@@ -235,7 +317,12 @@ async fn handle_framework_error(error: poise::FrameworkError<'_, Data, Error>) {
         }
     };
 
-    if let Err(reply_error) = util::reply_error(ctx, description, true).await {
+    // `reply_error_ephemeral`, not the plain `reply_error`: commands that
+    // deferred PUBLICLY before failing (/leaderboard, /show, the /create and
+    // /edit image paths) would otherwise surface the error publicly —
+    // Discord locks a deferred response's visibility at defer time (§2: all
+    // error replies are ephemeral).
+    if let Err(reply_error) = util::reply_error_ephemeral(ctx, description).await {
         log::error!(
             "Failed to deliver error reply for /{command} (guild={guild:?}, user={user}): {reply_error:?}"
         );
@@ -256,4 +343,177 @@ async fn shutdown_signal() -> Result<()> {
     #[cfg(not(unix))]
     tokio::signal::ctrl_c().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entities::bot_stats;
+    use crate::migrations::Migrator;
+    use sea_orm::{ColumnTrait, ConnectOptions, Database, EntityTrait, QueryFilter};
+    use sea_orm_migration::MigratorTrait;
+
+    // -- handle_framework_error i18n catalog coverage ------------------------
+
+    /// Every key `handle_framework_error` (and its `reply_error` helper) can
+    /// answer with must exist in the en-US catalog — `i18n::t` falls back to
+    /// the raw key id, which would otherwise ship to users unnoticed.
+    #[test]
+    fn framework_error_messages_exist_in_catalog() {
+        let locale = i18n::resolve(None);
+        for key in [
+            "common-error-title",
+            "common-error-generic",
+            "common-error-missing-user-permissions",
+            "common-error-guild-only",
+            "common-error-not-owner",
+            "common-error-invalid-input",
+        ] {
+            assert_ne!(i18n::t(&locale, key), key, "missing catalog entry for {key}");
+        }
+    }
+
+    /// The two parameterized error messages must interpolate their arguments.
+    #[test]
+    fn framework_error_messages_interpolate_arguments() {
+        let locale = i18n::resolve(None);
+
+        for seconds in [1u64, 7] {
+            let cooldown = i18n::t_args(
+                &locale,
+                "common-error-cooldown",
+                &[("seconds", seconds.into())],
+            );
+            assert_ne!(cooldown, "common-error-cooldown");
+            assert!(
+                cooldown.contains(&seconds.to_string()),
+                "cooldown message missing {seconds}: {cooldown}"
+            );
+        }
+
+        let bot_permissions = i18n::t_args(
+            &locale,
+            "common-error-missing-bot-permissions",
+            &[("permissions", "Manage Roles".into())],
+        );
+        assert_ne!(bot_permissions, "common-error-missing-bot-permissions");
+        assert!(
+            bot_permissions.contains("Manage Roles"),
+            "got: {bot_permissions}"
+        );
+    }
+
+    // -- success-only run counters (post_command hook) -----------------------
+
+    async fn fresh_db() -> DatabaseConnection {
+        // Single connection: each pooled connection to `sqlite::memory:`
+        // would otherwise get its own private database.
+        let mut options = ConnectOptions::new("sqlite::memory:");
+        options.max_connections(1).sqlx_logging(false);
+        let db = Database::connect(options).await.expect("connect to in-memory sqlite");
+        Migrator::fresh(&db).await.expect("apply migrations");
+        db
+    }
+
+    async fn counter(db: &DatabaseConnection, name: &str) -> Option<i64> {
+        bot_stats::Entity::find()
+            .filter(bot_stats::Column::Name.eq(name))
+            .one(db)
+            .await
+            .expect("read counter")
+            .map(|row| row.total)
+    }
+
+    #[tokio::test]
+    async fn record_run_counters_bumps_total_and_per_command() {
+        let db = fresh_db().await;
+
+        record_run_counters(&db, "award").await;
+        record_run_counters(&db, "award").await;
+        record_run_counters(&db, "stats").await;
+
+        assert_eq!(counter(&db, "total").await, Some(3));
+        assert_eq!(counter(&db, "award").await, Some(2));
+        assert_eq!(counter(&db, "stats").await, Some(1));
+    }
+
+    /// The hook swallows database errors (here: no `bot_stats` table at all)
+    /// — a counter failure must never take down an already-answered command.
+    #[tokio::test]
+    async fn record_run_counters_swallows_database_errors() {
+        let mut options = ConnectOptions::new("sqlite::memory:");
+        options.max_connections(1).sqlx_logging(false);
+        let db = Database::connect(options).await.expect("connect to in-memory sqlite");
+
+        record_run_counters(&db, "award").await; // must not panic or error
+    }
+
+    /// Legacy parity: `/rewards add` counts under `rewards`, exactly like the
+    /// old dispatcher's `data.commands.${interaction.commandName}`.
+    #[test]
+    fn run_counters_are_keyed_by_top_level_command_name() {
+        let all = commands::all();
+        let rewards = all
+            .iter()
+            .find(|c| c.name == "rewards")
+            .expect("rewards registered");
+        let add = rewards
+            .subcommands
+            .iter()
+            .find(|c| c.name == "add")
+            .expect("rewards add registered");
+        assert_eq!(root_command_name(&[rewards], add), "rewards");
+
+        let ping = all.iter().find(|c| c.name == "ping").expect("ping registered");
+        assert_eq!(root_command_name(&[], ping), "ping");
+    }
+
+    // -- startup command-listing diagnostic ----------------------------------
+
+    #[test]
+    fn command_listing_formats_names_and_empty_case() {
+        assert_eq!(format_command_listing(&[]), "none");
+        let names = ["ping".to_owned(), "award".to_owned(), "stats".to_owned()];
+        assert_eq!(format_command_listing(&names), "3 (ping, award, stats)");
+    }
+
+    // -- shutdown vs. early shard-runner exit ---------------------------------
+
+    #[tokio::test]
+    async fn shutdown_signal_wins_while_runner_is_alive() {
+        let mut runner = tokio::task::spawn(async {
+            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+            7u8
+        });
+        let exit = until_shutdown_or_runner_exit(async { Ok(()) }, &mut runner).await;
+        assert!(exit.is_none(), "a shutdown signal must not report an early exit");
+        runner.abort();
+    }
+
+    #[tokio::test]
+    async fn early_runner_exit_is_detected_without_a_signal() {
+        let mut runner = tokio::task::spawn(async { 7u8 });
+        let exit =
+            until_shutdown_or_runner_exit(std::future::pending::<Result<()>>(), &mut runner)
+                .await;
+        let join_result = exit.expect("runner death must end the wait");
+        assert_eq!(join_result.expect("runner task joined"), 7);
+    }
+
+    /// A broken signal listener degrades to an immediate shutdown request so
+    /// the cleanup path (panel updater, shards) still runs.
+    #[tokio::test]
+    async fn failed_signal_listener_is_treated_as_shutdown() {
+        let mut runner = tokio::task::spawn(async {
+            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+            7u8
+        });
+        let exit = until_shutdown_or_runner_exit(
+            async { Err(anyhow::anyhow!("no signal handler")) },
+            &mut runner,
+        )
+        .await;
+        assert!(exit.is_none());
+        runner.abort();
+    }
 }

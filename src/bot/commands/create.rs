@@ -142,12 +142,11 @@ pub(crate) fn parse_dedication(raw: &str) -> Dedication {
 
     let looks_like_snowflake = (15..=20).contains(&candidate.len())
         && candidate.bytes().all(|b| b.is_ascii_digit());
-    if looks_like_snowflake {
-        if let Ok(id) = candidate.parse::<u64>() {
-            if id > 0 {
-                return Dedication::User(id);
-            }
-        }
+    if looks_like_snowflake
+        && let Ok(id) = candidate.parse::<u64>()
+        && id > 0
+    {
+        return Dedication::User(id);
     }
     Dedication::Text(raw.to_string())
 }
@@ -259,33 +258,62 @@ pub(crate) async fn insert_trophy(
     }
 }
 
+/// Maps a parsed dedication plus the (attempted) user fetch onto the stored
+/// `(dedication_user_id, dedication_text)` columns. Pure so the fetch-failure
+/// path is testable; shared with `/edit`.
+///
+/// Legacy parity (globals.js `parseUser`: fetch failure → `notfound` → the
+/// raw text was stored): a mention/snowflake that does NOT resolve to a real
+/// user becomes a TEXT dedication holding the raw input — never a user
+/// dedication pointing at a broken `<@…>` mention with no text to fall back
+/// to.
+pub(crate) fn dedication_columns(
+    raw: &str,
+    parsed: Dedication,
+    fetched_name: Option<String>,
+) -> (Option<i64>, Option<String>) {
+    match parsed {
+        Dedication::Text(text) => (None, Some(text)),
+        Dedication::User(id) => match fetched_name {
+            Some(name) => (Some(id as i64), Some(name)),
+            None => (None, Some(raw.to_string())),
+        },
+    }
+}
+
 /// Resolves the dedication option into the stored columns. For a user
-/// dedication the display-name fallback (`dedication_text`) is fetched
-/// best-effort — legacy stored the username at creation time so display
-/// mode 1 still works after the user leaves (F36 consumer).
+/// dedication the display-name snapshot (`dedication_text`) is fetched —
+/// legacy stored the username at creation time so display mode 1 still works
+/// after the user leaves (F36 consumer); an unresolvable user falls back to
+/// a text dedication (see [`dedication_columns`]).
 async fn resolve_dedication(
     ctx: &Context<'_>,
     raw: Option<&str>,
 ) -> (Option<i64>, Option<String>) {
-    match raw.map(parse_dedication) {
-        None => (None, None),
-        Some(Dedication::Text(text)) => (None, Some(text)),
-        Some(Dedication::User(id)) => {
-            let name = match serenity::UserId::new(id).to_user(ctx.serenity_context()).await {
+    let Some(raw) = raw else {
+        return (None, None);
+    };
+    let parsed = parse_dedication(raw);
+    let fetched = match parsed {
+        Dedication::User(id) => {
+            match serenity::UserId::new(id).to_user(ctx.serenity_context()).await {
                 Ok(user) => Some(user.name.clone()),
                 Err(err) => {
-                    log::debug!("could not resolve dedication user {id}: {err}");
+                    log::debug!(
+                        "could not resolve dedication user {id}, storing the raw text instead: {err}"
+                    );
                     None
                 }
-            };
-            (Some(id as i64), name)
+            }
         }
-    }
+        Dedication::Text(_) => None,
+    };
+    dedication_columns(raw, parsed, fetched)
 }
 
 /// Create a new trophy for your server.
 #[allow(clippy::too_many_arguments)]
-#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD")]
+#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD", required_permissions = "MANAGE_GUILD")]
 pub async fn create(
     ctx: Context<'_>,
     #[description = "The name of the trophy."] name: String,
@@ -305,10 +333,7 @@ pub async fn create(
     details: Option<String>,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("guild_only command invoked outside a guild"))?
-        .get() as i64;
+    let guild_id = util::require_guild_id(&ctx)?.get() as i64;
     let value = value.unwrap_or(DEFAULT_VALUE);
 
     // F3: every validation happens before any download or DB write.
@@ -348,7 +373,10 @@ pub async fn create(
     }
 
     // Download (slow path) only after all checks passed; defer so the
-    // interaction never times out on a large attachment.
+    // interaction never times out on a large attachment. Every error reply
+    // past this point uses `reply_error_ephemeral`: the defer is PUBLIC (the
+    // success embed is public), and a plain followup could not make the
+    // error private (§2: all error replies are ephemeral).
     let trophy_id = Uuid::now_v7();
     let mut image_file: Option<(String, Vec<u8>)> = None;
     if let Some((url, ext)) = image_plan {
@@ -358,10 +386,9 @@ pub async fn create(
             Ok(bytes) => image_file = Some((filename, bytes)),
             Err(err) => {
                 log::warn!("/create image download failed (guild={guild_id}): {err:#}");
-                return util::reply_error(
+                return util::reply_error_ephemeral(
                     ctx,
                     i18n::t(&locale, "create-error-image-download"),
-                    true,
                 )
                 .await;
             }
@@ -390,13 +417,14 @@ pub async fn create(
         Ok(Ok(model)) => model,
         Ok(Err(err)) => {
             if let Some((filename, _)) = &image_file {
-                images::remove(filename);
+                images::remove(filename).await;
             }
-            return util::reply_error(ctx, err.message(&locale), true).await;
+            // Race-window duplicate: may run after the public defer above.
+            return util::reply_error_ephemeral(ctx, err.message(&locale)).await;
         }
         Err(err) => {
             if let Some((filename, _)) = &image_file {
-                images::remove(filename);
+                images::remove(filename).await;
             }
             return Err(err);
         }
@@ -420,14 +448,14 @@ pub async fn create(
             &[("name", trophy.name.clone().into())],
         )));
 
-    if trophy.signed {
-        if let Some(creator) = trophy.creator_user_id {
-            embed = embed.field(
-                i18n::t(&locale, "create-field-signed"),
-                format!("<@{creator}>"),
-                true,
-            );
-        }
+    if trophy.signed
+        && let Some(creator) = trophy.creator_user_id
+    {
+        embed = embed.field(
+            i18n::t(&locale, "create-field-signed"),
+            format!("<@{creator}>"),
+            true,
+        );
     }
     let dedication_display = match (trophy.dedication_user_id, &trophy.dedication_text) {
         (Some(id), _) => Some(format!("<@{id}>")),
@@ -553,6 +581,62 @@ mod tests {
         assert_eq!(parse_dedication("<@abc>"), Dedication::Text("<@abc>".into()));
         // Text is preserved verbatim (untouched by the trim used for parsing).
         assert_eq!(parse_dedication(" mom "), Dedication::Text(" mom ".into()));
+    }
+
+    /// Regression guard (§2 "all error replies are ephemeral"): the image
+    /// path defers PUBLICLY, and Discord locks visibility at defer time — so
+    /// every error reply issued after the defer must go through
+    /// `reply_error_ephemeral` (which deletes the public placeholder first),
+    /// never the plain `reply_error`. Checked on the source because poise
+    /// contexts aren't mockable (same pattern as `src/bot/buttons.rs`).
+    #[test]
+    fn errors_after_the_public_defer_are_ephemeral() {
+        let src = include_str!("create.rs");
+        // Handler body only (the segment ends at this very test's literal).
+        let handler = src.split("pub async fn create").nth(1).expect("handler exists");
+        let defer = handler.find("ctx.defer()").expect("image path defers");
+        // Built via concat! so this test's own source cannot match.
+        let plain_reply_error = concat!("util::reply_", "error(");
+        assert!(
+            !handler[defer..].contains(plain_reply_error),
+            "an error path after ctx.defer() uses the plain reply_error; \
+             use util::reply_error_ephemeral instead"
+        );
+    }
+
+    // --- dedication_columns (fetch-failure parity) ---
+
+    #[test]
+    fn resolved_user_dedication_stores_id_and_name_snapshot() {
+        let raw = "<@123456789012345678>";
+        assert_eq!(
+            dedication_columns(raw, parse_dedication(raw), Some("ana".into())),
+            (Some(123456789012345678), Some("ana".to_string()))
+        );
+    }
+
+    #[test]
+    fn unresolvable_user_dedication_falls_back_to_the_raw_text() {
+        // Legacy parity (globals.js parseUser): a well-formed but
+        // unresolvable mention/snowflake (typo, deleted account) is stored
+        // as a TEXT dedication with the raw input — NOT as a user
+        // dedication with a NULL text snapshot (which would render a broken
+        // <@…> mention in every display mode).
+        for raw in ["123456789012345678", "<@123456789012345678>"] {
+            assert_eq!(
+                dedication_columns(raw, parse_dedication(raw), None),
+                (None, Some(raw.to_string())),
+                "raw: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_dedication_ignores_any_fetched_name() {
+        assert_eq!(
+            dedication_columns("mom", parse_dedication("mom"), None),
+            (None, Some("mom".to_string()))
+        );
     }
 
     // --- i18n catalog ---

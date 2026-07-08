@@ -6,12 +6,12 @@
 //! - guilds / trophies / awards are **live COUNTs** from the normalized DB;
 //! - server and user counts from the gateway cache are labeled as cached;
 //! - uptime is real process uptime (instant pinned at command registration);
-//! - the `bot_stats` run counters are incremented **only after the reply is
-//!   delivered** (success-only), on top of the imported historical totals.
+//! - the `bot_stats` run counters are incremented **success-only**, on top of
+//!   the imported historical totals.
 //!
-//! The foundation provides no central post-command hook, so the success-only
-//! counter update lives here and currently covers `/stats` itself; a later
-//! batch can lift [`record_successful_run`] into a framework hook unchanged.
+//! The counters are recorded for EVERY command by the framework's
+//! `post_command` hook (see `record_command_run` in `src/bot/mod.rs`), which
+//! calls [`record_successful_run`] after a command action returns `Ok`.
 
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -88,12 +88,8 @@ async fn stats_command(ctx: Context<'_>) -> Result<(), Error> {
         .field(i18n::t(&locale, "stats-trophies-label"), trophies_value, true);
     util::reply_embed(ctx, embed, false).await?;
 
-    // Success-only counters (F34): recorded only after the reply went out.
-    // A counter failure must not surface an error for an already-answered
-    // interaction, so it is logged and swallowed.
-    if let Err(error) = record_successful_run(db, "stats").await {
-        log::error!("Failed to record /stats run in bot_stats: {error:?}");
-    }
+    // Success-only counters (F34) are bumped by the framework `post_command`
+    // hook once this returns `Ok` — no per-command bookkeeping here.
     Ok(())
 }
 

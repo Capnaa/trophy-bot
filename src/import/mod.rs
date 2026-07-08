@@ -44,6 +44,12 @@ const INSERT_CHUNK: usize = 500;
 /// Float tolerance for Phase 7 score comparisons (spec: |diff| > 0.001).
 const SCORE_TOLERANCE: f64 = 0.001;
 
+/// Schema CHECK bounds for `trophies.value` (initial schema migration).
+/// Legacy values outside this range (0 in production) are clamped to the
+/// nearest bound and reported, instead of aborting the import transaction.
+const TROPHY_VALUE_MIN: f64 = -999_999.0;
+const TROPHY_VALUE_MAX: f64 = 999_999.0;
+
 /// Tunables for the importer; production uses [`Default`].
 pub struct ImportOptions {
     /// Directory holding legacy trophy images (and receiving CDN downloads).
@@ -239,7 +245,10 @@ fn prepare(
     for key in keys {
         match &data.guilds[key] {
             GuildEntry::Tombstone => report.tombstoned_guilds.push(key.clone()),
-            GuildEntry::Corrupt(_) => report.corrupt_guilds.push(key.clone()),
+            GuildEntry::Corrupt(value) => report.corrupt_guilds.push(CorruptGuild {
+                key: key.clone(),
+                value: value.clone(),
+            }),
             GuildEntry::Guild(guild) => prepared.push(prepare_guild(key, guild, now, report)?),
         }
     }
@@ -271,7 +280,7 @@ fn prepare_guild(
             })
         })
         .transpose()?;
-    let settings = prepare_settings(guild_id, guild)?;
+    let settings = prepare_settings(guild_id, guild, report);
 
     Ok(PreparedGuild {
         id: guild_id,
@@ -409,16 +418,29 @@ fn prepare_trophy(
     };
 
     // f64::round rounds half-way cases away from zero — exactly the spec rule.
+    // A rounded value outside the schema CHECK range (±999,999; defense, 0 in
+    // production) is clamped to the nearest bound and reported, instead of
+    // aborting the whole transaction with an opaque chunk-level CHECK error.
     let raw_value = t.value;
-    let value = raw_value.round() as i32;
-    if raw_value.fract() != 0.0 {
-        report.rounded_values.push(RoundedValue {
-            guild_id,
-            legacy_id: legacy_id.to_owned(),
-            original: raw_value,
-            rounded: value,
-        });
-    }
+    let rounded = raw_value.round();
+    let value = if (TROPHY_VALUE_MIN..=TROPHY_VALUE_MAX).contains(&rounded) {
+        if raw_value.fract() != 0.0 {
+            report.rounded_values.push(RoundedValue {
+                guild_id,
+                legacy_id: legacy_id.to_owned(),
+                original: raw_value,
+                rounded: rounded as i32,
+            });
+        }
+        rounded as i32
+    } else {
+        note_invalid(report, guild_id, legacy_id, "value", raw_value.to_string());
+        if rounded < TROPHY_VALUE_MIN {
+            TROPHY_VALUE_MIN as i32
+        } else {
+            TROPHY_VALUE_MAX as i32
+        }
+    };
 
     let name = renamed.unwrap_or_else(|| t.name.clone());
     let normalized_name = normalize_name(&name);
@@ -521,6 +543,9 @@ fn prepare_awards(
 
 /// Phase 5: dedupe duplicate role IDs keeping the LOWEST requirement (the
 /// user-favorable fix for the legacy suppression bug), reporting removals.
+/// An entry whose requirement violates the schema `CHECK (requirement >= 1)`
+/// or exceeds i32 (defense, 0 in production) is dropped and reported instead
+/// of aborting the import transaction on the CHECK constraint.
 fn prepare_rewards(
     guild_id: i64,
     guild: &LegacyGuild,
@@ -531,9 +556,19 @@ fn prepare_rewards(
         let role_id: i64 = entry.role.parse().with_context(|| {
             format!("guild {guild_id}: non-numeric reward role `{}`", entry.role)
         })?;
-        let requirement = i32::try_from(entry.requirement).with_context(|| {
-            format!("guild {guild_id}: reward requirement out of range: {}", entry.requirement)
-        })?;
+        let requirement = match i32::try_from(entry.requirement) {
+            Ok(requirement) if requirement >= 1 => requirement,
+            _ => {
+                note_invalid(
+                    report,
+                    guild_id,
+                    &entry.role,
+                    "reward.requirement",
+                    entry.requirement.to_string(),
+                );
+                continue;
+            }
+        };
         grouped.entry(role_id).or_default().push(requirement);
     }
 
@@ -556,31 +591,38 @@ fn prepare_rewards(
 
 /// Phase 5: a settings row exists only when at least one key was explicitly
 /// present in legacy; absent keys stay NULL (code-side defaults, like
-/// legacy `getSetting`).
-fn prepare_settings(guild_id: i64, guild: &LegacyGuild) -> Result<Option<PreparedSettings>> {
-    let get = |key: &str| -> Result<Option<i16>> {
-        guild
-            .settings
-            .get(key)
-            .map(|v| {
-                i16::try_from(*v)
-                    .with_context(|| format!("guild {guild_id}: setting `{key}` out of range: {v}"))
-            })
-            .transpose()
+/// legacy `getSetting`). A present index outside its column's schema CHECK
+/// range (defense, 0 in production) also stays NULL — treated like an absent
+/// key and reported, instead of aborting the import transaction on the CHECK
+/// constraint.
+fn prepare_settings(
+    guild_id: i64,
+    guild: &LegacyGuild,
+    report: &mut ImportReport,
+) -> Option<PreparedSettings> {
+    // `max` is each column's schema CHECK upper bound (all lower bounds are 0).
+    let mut get = |key: &'static str, max: i64| -> Option<i16> {
+        let v = *guild.settings.get(key)?;
+        if (0..=max).contains(&v) {
+            Some(v as i16)
+        } else {
+            note_invalid(report, guild_id, key, "setting", v.to_string());
+            None
+        }
     };
     let settings = PreparedSettings {
-        dedication_display: get("dedication_display")?,
-        stack_roles: get("stack_roles")?,
-        hide_unused_trophies: get("hide_unused_trophies")?,
-        hide_quit_users: get("hide_quit_users")?,
-        leaderboard_format: get("leaderboard_format")?,
+        dedication_display: get("dedication_display", 2),
+        stack_roles: get("stack_roles", 1),
+        hide_unused_trophies: get("hide_unused_trophies", 1),
+        hide_quit_users: get("hide_quit_users", 1),
+        leaderboard_format: get("leaderboard_format", 3),
     };
     let any_present = settings.dedication_display.is_some()
         || settings.stack_roles.is_some()
         || settings.hide_unused_trophies.is_some()
         || settings.hide_quit_users.is_some()
         || settings.leaderboard_format.is_some();
-    Ok(any_present.then_some(settings))
+    any_present.then_some(settings)
 }
 
 // ---------------------------------------------------------------------------

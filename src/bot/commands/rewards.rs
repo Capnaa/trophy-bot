@@ -9,9 +9,12 @@
 //!   compared a stored id string against a Role object — always false);
 //!   `UNIQUE(guild_id, role_id)` backs this at the DB level.
 //! - F23: the limit is exactly 20 rewards (legacy off-by-one allowed 21).
-//! - F24: `remove` operates on the STORED role id — the parameter is a role
-//!   mention or raw id string, so rewards pointing at deleted roles can be
-//!   removed; `list` marks deleted roles.
+//! - F24: `remove` operates on the STORED role id — the parameter is a
+//!   string with autocomplete over the configured rewards (value = stored
+//!   role id), also accepting a pasted mention or raw id, so rewards
+//!   pointing at deleted roles can be removed; `list` marks deleted roles.
+//!   The parameter-type change vs the legacy Role option is a documented
+//!   intentional delta (rust-parity-plan.md §4).
 //! - F25: correct command/subcommand descriptions (legacy source shipped
 //!   copy-paste strings like "Add permissions to a role.").
 //!
@@ -30,9 +33,11 @@
 //! - Principle 3: absent an ADR-backed delta, legacy behavior wins — and
 //!   legacy QUIRK (commands-admin.md, rewards.js:176-182) is exactly this,
 //!   surfaced to users in the remove footer.
+//!
 //! A guild-wide reconcile inside a slash-command handler would also be an
 //! unbounded fan-out of role API calls; if wanted, it belongs to the
 //! background-work batch (§3.4) next to the panel sweep, not here.
+//!
 //! New: explicit empty-state message on `list` (the legacy zero-width-space
 //! trick would be a 400 on Discord's current API).
 
@@ -46,8 +51,8 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-use super::trophies::paginate;
-use crate::bot::{Context, Error, util};
+use crate::bot::util::{self, paginate};
+use crate::bot::{Context, Error};
 use crate::domain::queries;
 use crate::entities::{guilds, role_rewards};
 use crate::i18n::{self, LanguageIdentifier};
@@ -64,6 +69,7 @@ pub(crate) const MAX_REQUIREMENT: i64 = i32::MAX as i64;
     slash_command,
     guild_only,
     default_member_permissions = "MANAGE_GUILD",
+    required_permissions = "MANAGE_GUILD",
     subcommands("add", "remove", "clear", "list"),
     subcommand_required
 )]
@@ -178,7 +184,8 @@ async fn add(
 #[poise::command(slash_command, guild_only)]
 async fn remove(
     ctx: Context<'_>,
-    #[description = "The role to remove: a role mention or a raw role ID (works for deleted roles)."]
+    #[description = "The reward role to remove. Pick a suggestion, or paste a mention/ID (works for deleted roles)."]
+    #[autocomplete = "autocomplete_reward_role"]
     role: String,
 ) -> Result<(), Error> {
     let guild_id = require_guild_id(&ctx)?;
@@ -373,6 +380,104 @@ pub(crate) fn is_role_below(a: (u16, u64), b: (u16, u64)) -> bool {
 /// their own highest role.
 pub(crate) fn hierarchy_allows(is_owner: bool, caller_top: (u16, u64), target: (u16, u64)) -> bool {
     is_owner || is_role_below(target, caller_top)
+}
+
+/// Pure choice builder behind [`autocomplete_reward_role`]: filters the
+/// guild's configured rewards (`(role_id, requirement, live role name)` —
+/// `None` name = the role no longer exists) by the partial input and returns
+/// `(label, value)` pairs. The VALUE is always the raw role id string, which
+/// [`parse_role_ref`] accepts, so picking a suggestion works for deleted
+/// roles too (F24). Matching is case-insensitive on the role name and
+/// prefix-based on the id (pasted `<@&…>` mentions are unwrapped first).
+pub(crate) fn reward_remove_choices(
+    locale: &LanguageIdentifier,
+    rewards: &[(i64, i32, Option<String>)],
+    partial: &str,
+) -> Vec<(String, String)> {
+    let needle = partial.trim();
+    let needle = needle
+        .strip_prefix("<@&")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .unwrap_or(needle)
+        .to_lowercase();
+
+    rewards
+        .iter()
+        .filter(|(role_id, _, name)| {
+            needle.is_empty()
+                || name.as_ref().is_some_and(|n| n.to_lowercase().contains(&needle))
+                || role_id.to_string().starts_with(&needle)
+        })
+        .map(|(role_id, requirement, name)| {
+            let label = match name {
+                Some(name) => i18n::t_args(
+                    locale,
+                    "rewards-remove-choice",
+                    &[("name", name.clone().into()), ("requirement", (*requirement).into())],
+                ),
+                None => i18n::t_args(
+                    locale,
+                    "rewards-remove-choice-deleted",
+                    &[("id", role_id.to_string().into()), ("requirement", (*requirement).into())],
+                ),
+            };
+            // Discord caps choice labels at 100 characters.
+            (label.chars().take(100).collect(), role_id.to_string())
+        })
+        .take(crate::bot::resolver::MAX_CHOICES)
+        .collect()
+}
+
+/// Poise autocomplete callback for the `/rewards remove` role option: offers
+/// the guild's CONFIGURED rewards (max 20, so never truncated by Discord's
+/// 25-choice cap), labeled with the live role name — or marked deleted when
+/// the role is gone — while the sent value stays the stored role id (F24).
+/// Autocomplete cannot report errors, so failures log and yield no choices;
+/// the user can still paste a mention or raw id.
+async fn autocomplete_reward_role(
+    ctx: Context<'_>,
+    partial: &str,
+) -> Vec<serenity::AutocompleteChoice> {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Vec::new();
+    };
+    let locale = util::locale(&ctx);
+    let rewards = match list_rewards(&ctx.data().db, guild_id.get() as i64).await {
+        Ok(rewards) => rewards,
+        Err(err) => {
+            log::warn!(
+                "reward-role autocomplete query failed (guild={}): {err:#}",
+                guild_id.get()
+            );
+            return Vec::new();
+        }
+    };
+
+    // Cache access after every await: the guard must not live across one.
+    // With the guild uncached the deleted-marker cannot be decided, so the
+    // raw id doubles as the display name instead of flagging everything.
+    let live_names: Option<std::collections::HashMap<i64, String>> = ctx.guild().map(|guild| {
+        guild
+            .roles
+            .iter()
+            .map(|(id, role)| (id.get() as i64, role.name.clone()))
+            .collect()
+    });
+    let candidates: Vec<(i64, i32, Option<String>)> = rewards
+        .iter()
+        .map(|reward| {
+            let name = match &live_names {
+                Some(names) => names.get(&reward.role_id).cloned(),
+                None => Some(reward.role_id.to_string()),
+            };
+            (reward.role_id, reward.requirement, name)
+        })
+        .collect();
+
+    reward_remove_choices(&locale, &candidates, partial)
+        .into_iter()
+        .map(|(label, value)| serenity::AutocompleteChoice::new(label, value))
+        .collect()
 }
 
 /// Parses a role reference: a mention (`<@&123>`) or a raw id (`123`).
@@ -599,10 +704,7 @@ async fn hierarchy_context(
 }
 
 fn require_guild_id(ctx: &Context<'_>) -> Result<i64, Error> {
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("/rewards invoked outside a guild"))?;
-    Ok(i64::try_from(guild_id.get())?)
+    Ok(util::require_guild_id(ctx)?.get() as i64)
 }
 
 #[cfg(test)]
@@ -655,6 +757,93 @@ mod tests {
         assert!(hierarchy_allows(false, caller_top, (5, 20)));
         // Same position, lower id → the target is ABOVE the caller's role.
         assert!(!hierarchy_allows(false, caller_top, (5, 5)));
+    }
+
+    // ---- /rewards remove autocomplete (F24 + §4 delta) --------------------
+
+    fn choice_fixtures() -> Vec<(i64, i32, Option<String>)> {
+        vec![
+            (100, 10, Some("Bronze Tier".to_string())),
+            (200, 50, Some("Silver Tier".to_string())),
+            (300, 90, None), // deleted role
+        ]
+    }
+
+    #[test]
+    fn remove_choices_value_is_always_the_stored_role_id() {
+        let choices = reward_remove_choices(&en(), &choice_fixtures(), "");
+        let values: Vec<&str> = choices.iter().map(|(_, value)| value.as_str()).collect();
+        assert_eq!(values, vec!["100", "200", "300"]);
+        for (label, value) in &choices {
+            assert!(parse_role_ref(value).is_some(), "value {value} must parse");
+            assert!(!label.is_empty() && label.chars().count() <= 100);
+        }
+    }
+
+    #[test]
+    fn remove_choices_filter_by_name_case_insensitively() {
+        let choices = reward_remove_choices(&en(), &choice_fixtures(), "silver");
+        assert_eq!(choices.len(), 1);
+        assert!(choices[0].0.contains("Silver Tier"), "label: {}", choices[0].0);
+        assert_eq!(choices[0].1, "200");
+        // Substring, not only prefix.
+        assert_eq!(reward_remove_choices(&en(), &choice_fixtures(), "TIER").len(), 2);
+    }
+
+    #[test]
+    fn remove_choices_filter_by_id_prefix_and_unwrap_mentions() {
+        // A deleted role has no name; it is findable by id (or listed blank).
+        let by_id = reward_remove_choices(&en(), &choice_fixtures(), "30");
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0].1, "300");
+        let by_mention = reward_remove_choices(&en(), &choice_fixtures(), "<@&300>");
+        assert_eq!(by_mention.len(), 1);
+        assert_eq!(by_mention[0].1, "300");
+    }
+
+    #[test]
+    fn remove_choices_mark_deleted_roles_and_show_requirements() {
+        let choices = reward_remove_choices(&en(), &choice_fixtures(), "");
+        assert!(choices[0].0.contains("10"), "requirement shown: {}", choices[0].0);
+        let deleted_marker = choices[2].0.to_lowercase();
+        assert!(deleted_marker.contains("deleted"), "deleted marked: {}", choices[2].0);
+        assert!(choices[2].0.contains("300"), "deleted labeled by id: {}", choices[2].0);
+        assert!(
+            !choices[0].0.to_lowercase().contains("deleted"),
+            "live roles are not flagged: {}",
+            choices[0].0
+        );
+    }
+
+    #[test]
+    fn remove_choices_no_match_yields_no_choices() {
+        assert!(reward_remove_choices(&en(), &choice_fixtures(), "nope").is_empty());
+        assert!(reward_remove_choices(&en(), &[], "").is_empty());
+    }
+
+    /// The `/rewards remove` parameter delta (String + autocomplete instead
+    /// of the legacy Role option, required by F24) is user-visible and MUST
+    /// stay listed in rust-parity-plan.md §4. If this fails you changed the
+    /// parameter or removed the docs entry.
+    #[test]
+    fn remove_parameter_delta_is_documented_in_the_parity_plan() {
+        let plan = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/specs/rust-parity-plan.md"
+        ))
+        .expect("read rust-parity-plan.md");
+        let deltas = plan
+            .split("## 4.")
+            .nth(1)
+            .expect("parity plan has a §4 intentional-deltas section");
+        assert!(
+            deltas.contains("`/rewards remove`"),
+            "§4 must list the /rewards remove parameter delta"
+        );
+        assert!(
+            deltas.contains("autocomplete over the configured rewards"),
+            "§4 must describe the autocomplete replacement"
+        );
     }
 
     #[test]
@@ -724,6 +913,8 @@ mod tests {
         let role = || ("role", "<@&1>".into());
         let requirement = || ("requirement", 100.into());
         let with_args: &[(&str, Vec<(&'static str, i18n::FluentValue<'static>)>)] = &[
+            ("rewards-remove-choice", vec![("name", "Silver".into()), requirement()]),
+            ("rewards-remove-choice-deleted", vec![("id", "300".into()), requirement()]),
             ("rewards-add-success", vec![requirement(), role()]),
             ("rewards-add-error-requirement-too-large", vec![("max", MAX_REQUIREMENT.into())]),
             ("rewards-add-error-limit", vec![("max", 20.into())]),

@@ -12,7 +12,7 @@ pub use model::*;
 
 use anyhow::{Context, Result};
 use sea_orm::sea_query::{Expr, ExprTrait, Query};
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
 use std::collections::HashMap;
 
 /// Where the production quick.db file lives relative to the working dir.
@@ -30,8 +30,9 @@ impl LegacyData {
     /// Loads and parses both documents from the quick.db SQLite file at `path`
     /// (a filesystem path, e.g. `./json.sqlite`).
     pub async fn load(path: &str) -> Result<Self> {
-        let url = legacy_url(path);
-        let db = Database::connect(&url)
+        let options = legacy_connect_options(path);
+        let url = options.get_url().to_owned();
+        let db = Database::connect(options)
             .await
             .with_context(|| format!("connecting to legacy quick.db at {url}"))?;
 
@@ -45,21 +46,18 @@ impl LegacyData {
             serde_json::from_str(&bot_json).context("parsing legacy `bot` document")?;
         let guilds = parse_guilds(&guilds_json)?;
 
+        let data = Self { bot, guilds };
         log::info!(
             "loaded legacy data: {} root guild keys ({} tombstones, {} corrupt)",
-            guilds.len(),
-            guilds.values().filter(|entry| entry.is_tombstone()).count(),
-            guilds.values().filter(|entry| entry.is_corrupt()).count(),
+            data.guilds.len(),
+            data.tombstone_count(),
+            data.corrupt_count(),
         );
-        Ok(Self { bot, guilds })
-    }
-
-    /// [`Self::load`] from the default `./json.sqlite` location.
-    pub async fn load_default() -> Result<Self> {
-        Self::load(DEFAULT_LEGACY_DB_PATH).await
+        Ok(data)
     }
 
     /// Valid guilds only (tombstones skipped), as `(guild_id, guild)` pairs.
+    #[cfg(test)]
     pub fn guilds(&self) -> impl Iterator<Item = (&str, &LegacyGuild)> {
         self.guilds
             .iter()
@@ -86,6 +84,13 @@ impl LegacyData {
         stats.insert("rootTrophies".to_owned(), self.bot.trophies);
         stats
     }
+}
+
+/// Connection options for the legacy quick.db file. sqlx statement logging is
+/// disabled (it defaults to INFO) so `import` does not interleave raw quick.db
+/// SQL with the report operators must review, regardless of `DEBUG`.
+fn legacy_connect_options(path: &str) -> ConnectOptions {
+    ConnectOptions::new(legacy_url(path)).sqlx_logging(false).to_owned()
 }
 
 /// Builds the SQLite connection URL for the legacy quick.db file, enforcing

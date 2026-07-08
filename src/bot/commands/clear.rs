@@ -42,15 +42,13 @@ pub(crate) async fn clear_awards(
 }
 
 /// Clear all trophies and resets the score of an user to 0.
-#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD")]
+#[poise::command(slash_command, guild_only, default_member_permissions = "MANAGE_GUILD", required_permissions = "MANAGE_GUILD")]
 pub async fn clear(
     ctx: Context<'_>,
     #[description = "User to clear all trophies from"] user: serenity::User,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("guild_only command invoked outside a guild"))?;
+    let guild_id = util::require_guild_id(&ctx)?;
     let db = &ctx.data().db;
 
     let cleared = clear_awards(db, guild_id.get() as i64, user.id.get() as i64).await?;

@@ -86,10 +86,10 @@ mod tests {
         let locale = resolve(None);
         let text = t_args(
             &locale,
-            "bench-response",
-            &[("latency", 42.into()), ("time", 0.5.into())],
+            "award-error-count",
+            &[("min", 1.into()), ("max", 50.into())],
         );
-        assert!(text.contains("42"), "got: {text}");
+        assert!(text.contains('1') && text.contains("50"), "got: {text}");
     }
 
     #[test]
@@ -97,28 +97,40 @@ mod tests {
         assert_eq!(t(&resolve(None), "no-such-key"), "no-such-key");
     }
 
+    /// The under-construction stub strings were removed together with the
+    /// dead `reply_under_construction` helper once all 24 commands landed.
+    /// Guard against reintroducing orphaned catalog keys under those names.
+    #[test]
+    fn under_construction_stub_keys_are_gone() {
+        let locale = resolve(None);
+        for key in ["common-under-construction-title", "common-under-construction"] {
+            assert_eq!(t(&locale, key), key, "orphaned stub key {key} resurfaced");
+        }
+    }
+
+    /// main.ftl was a scaffold catalog whose four example keys were never
+    /// referenced by production code (which uses `common-error-generic` and
+    /// per-command `*-error-not-found` / `award-awarded` keys instead). The
+    /// file was deleted; guard against its dead keys resurfacing.
+    #[test]
+    fn scaffold_main_ftl_keys_are_gone() {
+        let locale = resolve(None);
+        for key in [
+            "error-generic",
+            "error-trophy-not-found",
+            "bench-response",
+            "award-success",
+        ] {
+            assert_eq!(t(&locale, key), key, "orphaned scaffold key {key} resurfaced");
+        }
+    }
+
     #[test]
     fn plural_selection_works() {
         let locale = resolve(None);
-        let one = t_args(
-            &locale,
-            "award-success",
-            &[
-                ("count", 1.into()),
-                ("trophy", "Gold".into()),
-                ("user", "ana".into()),
-            ],
-        );
-        let many = t_args(
-            &locale,
-            "award-success",
-            &[
-                ("count", 3.into()),
-                ("trophy", "Gold".into()),
-                ("user", "ana".into()),
-            ],
-        );
-        assert!(!one.contains('×'), "got: {one}");
-        assert!(many.contains('3'), "got: {many}");
+        let one = t_args(&locale, "common-error-cooldown", &[("seconds", 1.into())]);
+        let many = t_args(&locale, "common-error-cooldown", &[("seconds", 3.into())]);
+        assert!(!one.contains("seconds"), "got: {one}");
+        assert!(many.contains('3') && many.contains("seconds"), "got: {many}");
     }
 }

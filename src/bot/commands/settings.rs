@@ -41,6 +41,7 @@ pub(crate) const ALL_SETTINGS: [Setting; 5] = [
     slash_command,
     guild_only,
     default_member_permissions = "MANAGE_GUILD",
+    required_permissions = "MANAGE_GUILD",
     subcommands("set", "list"),
     subcommand_required
 )]
@@ -408,10 +409,7 @@ async fn apply_set(ctx: Context<'_>, setting: Setting, chosen: Option<i16>) -> R
 }
 
 fn require_guild_id(ctx: &Context<'_>) -> Result<i64, Error> {
-    let id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("guild_only command invoked outside a guild"))?;
-    Ok(i64::try_from(id.get())?)
+    Ok(util::require_guild_id(ctx)?.get() as i64)
 }
 
 #[cfg(test)]

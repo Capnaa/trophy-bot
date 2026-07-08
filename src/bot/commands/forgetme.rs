@@ -12,7 +12,9 @@
 //!
 //! The confirmation buttons are consumed by `src/bot/buttons.rs` (component
 //! interaction handler wired into the poise framework options), which also
-//! enforces the 60-second confirmation timeout encoded in the custom ids.
+//! enforces the 60-second confirmation timeout encoded in the custom ids —
+//! an intentional delta vs legacy (never-expiring buttons), documented in
+//! rust-parity-plan.md §4.8 and announced in the warning embed below.
 
 use poise::serenity_prelude as serenity;
 
@@ -20,12 +22,10 @@ use crate::bot::{buttons, util, Context, Error};
 use crate::i18n;
 
 /// Remove all images and data about your server from the bot and kick it.
-#[poise::command(slash_command, guild_only, default_member_permissions = "ADMINISTRATOR")]
+#[poise::command(slash_command, guild_only, default_member_permissions = "ADMINISTRATOR", required_permissions = "ADMINISTRATOR")]
 pub async fn forgetme(ctx: Context<'_>) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("guild_only command invoked outside a guild"))?;
+    let guild_id = util::require_guild_id(&ctx)?;
 
     // Owner gate (F33: explicit ephemeral rejection, never a silent no-op).
     // Cache first; the guard is dropped at the end of the statement so it

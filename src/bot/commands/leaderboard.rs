@@ -13,9 +13,7 @@ pub async fn leaderboard(
     ctx: Context<'_>,
     #[description = "Which page to show. Defaults to 1"] page: Option<i64>,
 ) -> Result<(), Error> {
-    let guild_id = ctx
-        .guild_id()
-        .ok_or_else(|| anyhow::anyhow!("guild_only command invoked without a guild"))?;
+    let guild_id = util::require_guild_id(&ctx)?;
 
     // Legacy parity: the reply is publicly deferred (member lookups can
     // exceed the 3-second interaction window on large boards).
