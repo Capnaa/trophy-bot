@@ -131,32 +131,46 @@ pub async fn target_for_user(
     Ok(Some((target, configured)))
 }
 
-/// Guild role metadata: from the gateway cache when available, otherwise
-/// fetched over HTTP.
-async fn guild_roles(
-    ctx: &Context<'_>,
-    guild_id: serenity::GuildId,
-) -> anyhow::Result<HashMap<i64, RoleMeta>> {
-    if let Some(guild) = ctx.guild() {
-        return Ok(guild
-            .roles
-            .iter()
-            .map(|(id, role)| {
-                (id.get() as i64, RoleMeta { position: role.position, managed: role.managed })
-            })
-            .collect());
-    }
-    let fetched = guild_id.roles(ctx.http()).await?;
-    Ok(fetched
-        .iter()
+/// Snapshot of a guild's role metadata as the engine consumes it.
+fn role_meta_map<'a>(
+    roles: impl IntoIterator<Item = (&'a serenity::RoleId, &'a serenity::Role)>,
+) -> HashMap<i64, RoleMeta> {
+    roles
+        .into_iter()
         .map(|(id, role)| {
             (id.get() as i64, RoleMeta { position: role.position, managed: role.managed })
         })
-        .collect())
+        .collect()
 }
 
 /// Recomputes and applies the reward roles for one user in one guild. Called
 /// after `/award`, `/revoke` and `/clear` commit their database changes.
+///
+/// Thin interaction-context wrapper over [`apply_rewards_via`]: it snapshots
+/// the gateway cache's role map (when the guild is cached) so the shared
+/// engine skips the HTTP role fetch, exactly as before.
+pub async fn apply_rewards(
+    ctx: &Context<'_>,
+    guild_id: serenity::GuildId,
+    user_id: serenity::UserId,
+) -> anyhow::Result<()> {
+    let cached_roles = ctx.guild().map(|guild| role_meta_map(guild.roles.iter()));
+    let bot_id = ctx.serenity_context().cache.current_user().id;
+    apply_rewards_via(
+        &ctx.data().db,
+        ctx.serenity_context(),
+        bot_id,
+        cached_roles,
+        guild_id,
+        user_id,
+    )
+    .await
+}
+
+/// The reward engine proper, callable from any [`serenity::CacheHttp`]
+/// (interaction contexts AND cache-less HTTP clients like the smoke harness).
+/// `cached_roles` lets callers inject an already-known role map; `None`
+/// fetches the guild roles over HTTP.
 ///
 /// Behavior guarantees (§2 of the parity plan):
 /// - non-members are a logged no-op (legacy /award allows awarding them);
@@ -168,12 +182,14 @@ async fn guild_roles(
 /// `Err` is returned only for infrastructure failures before any role change
 /// is attempted (DB errors, role list unavailable); callers log it — the
 /// triggering command has already committed and replied.
-pub async fn apply_rewards(
-    ctx: &Context<'_>,
+pub async fn apply_rewards_via(
+    db: &sea_orm::DatabaseConnection,
+    cache_http: &impl serenity::CacheHttp,
+    bot_id: serenity::UserId,
+    cached_roles: Option<HashMap<i64, RoleMeta>>,
     guild_id: serenity::GuildId,
     user_id: serenity::UserId,
 ) -> anyhow::Result<()> {
-    let db = &ctx.data().db;
     let gid = guild_id.get() as i64;
     let uid = user_id.get() as i64;
 
@@ -181,7 +197,7 @@ pub async fn apply_rewards(
         return Ok(());
     };
 
-    let member = match guild_id.member(ctx.serenity_context(), user_id).await {
+    let member = match guild_id.member(cache_http, user_id).await {
         Ok(member) => member,
         Err(err) => {
             log::debug!(
@@ -197,9 +213,11 @@ pub async fn apply_rewards(
         return Ok(());
     }
 
-    let roles = guild_roles(ctx, guild_id).await?;
-    let bot_id = ctx.serenity_context().cache.current_user().id;
-    let bot_top = match guild_id.member(ctx.serenity_context(), bot_id).await {
+    let roles = match cached_roles {
+        Some(roles) => roles,
+        None => role_meta_map(&guild_id.roles(cache_http.http()).await?),
+    };
+    let bot_top = match guild_id.member(cache_http, bot_id).await {
         Ok(bot_member) => {
             let bot_roles: Vec<i64> = bot_member.roles.iter().map(|id| id.get() as i64).collect();
             bot_top_position(&bot_roles, &roles)
@@ -220,7 +238,7 @@ pub async fn apply_rewards(
 
     for role_id in add {
         if let Err(err) = member
-            .add_role(ctx.http(), serenity::RoleId::new(role_id as u64))
+            .add_role(cache_http.http(), serenity::RoleId::new(role_id as u64))
             .await
         {
             log::error!("failed to add reward role {role_id} to user {uid} in guild {gid}: {err}");
@@ -228,7 +246,7 @@ pub async fn apply_rewards(
     }
     for role_id in remove {
         if let Err(err) = member
-            .remove_role(ctx.http(), serenity::RoleId::new(role_id as u64))
+            .remove_role(cache_http.http(), serenity::RoleId::new(role_id as u64))
             .await
         {
             log::error!(

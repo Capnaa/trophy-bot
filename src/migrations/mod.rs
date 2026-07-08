@@ -48,6 +48,7 @@ pub async fn cli(cli: Cli) -> anyhow::Result<()> {
         Some(MigrateSubcommands::Up { num }) => Migrator::up(&db, num).await,
         Some(MigrateSubcommands::Down { num }) => Migrator::down(&db, Some(num)).await,
         Some(MigrateSubcommands::Import { .. }) => unreachable!("handled above"),
+        Some(MigrateSubcommands::Smoke) => unreachable!("routed to crate::smoke in main"),
         None => Migrator::up(&db, None).await,
     };
 
@@ -91,6 +92,11 @@ pub enum MigrateSubcommands {
         )]
         legacy_db: String,
     },
+    #[command(
+        about = "Run the end-to-end smoke flow against the test guild on a disposable smoke.sqlite",
+        display_order = 110
+    )]
+    Smoke,
     #[command(about = "Rollback applied migrations", display_order = 80)]
     Down {
         #[arg(

@@ -6,9 +6,11 @@
 //! registers from day one. Each stub file names the batch that implements it.
 
 mod about;
-mod award;
-mod clear;
-mod create;
+// `pub(crate)` modules expose their plain business-logic functions to the
+// smoke harness (`crate::smoke`) — the poise handlers stay untouched.
+pub(crate) mod award;
+pub(crate) mod clear;
+pub(crate) mod create;
 mod delete;
 mod details;
 mod edit;
@@ -21,8 +23,8 @@ mod leaderboard;
 mod panel;
 mod permissions;
 mod ping;
-mod revoke;
-mod rewards;
+pub(crate) mod revoke;
+pub(crate) mod rewards;
 mod settings;
 mod show;
 mod stats;
