@@ -61,6 +61,7 @@ DB stores the filename string; files in `./images/` are used as-is (no renaming 
 - **Counts:** valid guilds == 2,488; tombstones == 5; trophies == 10,853; awards == 60,554 with orphans == 0; renames == 643; rounded values == 44; panels == 461; rewards == 275 after dedupe (12 removed).
 - **Scores:** per user, compare stored `trophyValue` vs the recalculated `SUM` of the (rounded, as-stored) values — **float-tolerant** comparison (|diff| > 0.001; 60 users have float stored values). Expected mismatches: **133 users total** — 51 genuine legacy drift (range −990..+3,500) plus 82 induced by rounding the 44 float-valued trophies; the report classifies each mismatch as `legacy_drift` or `rounding` (recompute with raw float values to tell them apart) → report `score_mismatches`; NOT reconciled (ADR 0006) — the recalculated value is correct by definition.
 - Report written as JSON + logged summary. Cutover proceeds only after human review of: tombstoned/corrupt guilds, renames, rounded values, missing/expired images, deduped rewards, score mismatches.
+- **Deep content verification** (beyond the counters): `scripts/verify_import.py` cross-checks the imported DB field-by-field against the source JSON — every trophy's fields/renames/rounding, every user's award count and recomputed score, rewards after dedupe, panels, settings, bot_stats, FK integrity, normalized-name uniqueness, legacy timestamps and image dispositions. Run it after every import; it must print `NO PROBLEMS DETECTED`.
 
 ## Staging: local-first validation
 
