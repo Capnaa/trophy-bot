@@ -291,7 +291,10 @@ pub async fn create(
     #[description = "The name of the trophy."] name: String,
     #[description = "Description for the trophy"] description: Option<String>,
     #[description = "An emoji for the trophy, leave blank for default"] emoji: Option<String>,
-    #[description = "How much this trophy values. Defaults to 10"] value: Option<i32>,
+    #[description = "How much this trophy values. Defaults to 10"]
+    #[min = -999_999]
+    #[max = 999_999]
+    value: Option<i32>,
     #[description = "Dedicate the trophy to someone, defaults to no one. You can use an id or mention as well"]
     dedication: Option<String>,
     #[description = "If true, you'll sign this trophy as created by you. Defaults to false"]
