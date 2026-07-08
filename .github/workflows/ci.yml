@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev, migration]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test & clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Tests use in-memory SQLite (sqlx bundles libsqlite3); no services
+      # needed. The #[ignore] tests validate against the git-excluded
+      # production snapshot and are intentionally not run in CI.
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test
