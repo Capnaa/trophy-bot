@@ -99,7 +99,8 @@ pub(crate) fn validate_fields(
 
     // A blank name would store an empty normalized_name and emit an empty
     // autocomplete choice, which Discord rejects (400) — breaking autocomplete
-    // for the whole guild. Discord options carry no min_length, so enforce here.
+    // for the whole guild. The `#[min_length = 1]` option rejects "" client-side
+    // but not whitespace-only, so the real guard lives here (and covers the API).
     if name.trim().is_empty() {
         return Err(CreateError::EmptyName);
     }
@@ -531,8 +532,8 @@ mod tests {
         // Regression: a blank name persists with normalized_name == "" and,
         // worse, becomes an empty autocomplete choice label — which Discord
         // rejects (HTTP 400), breaking trophy autocomplete for EVERY command
-        // in the guild until the row is removed. Must be refused server-side
-        // (Discord options carry no min_length).
+        // in the guild until the row is removed. `#[min_length = 1]` stops ""
+        // client-side but not whitespace-only, so validate_fields must too.
         assert_eq!(
             validate_fields("", None, None, 10, None, None),
             Err(CreateError::EmptyName)
