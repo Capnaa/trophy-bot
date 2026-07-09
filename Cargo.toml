@@ -19,7 +19,10 @@ serde_json = "1.0"
 sea-orm-migration = { version = "=2.0.0-rc.42", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+# Pinned to 0.12: it still exposes the `rustls-tls` feature (renamed to
+# `rustls` in 0.13, which also switches the crypto provider to aws-lc) and
+# matches the reqwest that serenity 0.12 pulls in, so there is a single copy.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # Discord API
 serenity = { version = "0.12", features = ["client", "gateway", "rustls_backend"] }
