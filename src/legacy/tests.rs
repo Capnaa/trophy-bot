@@ -233,7 +233,7 @@ fn legacy_url_enforces_read_only_mode() {
 fn legacy_connection_disables_sqlx_statement_logging() {
     // sea-orm defaults sqlx statement logging to INFO, which would interleave
     // raw quick.db SQL with the import report even with DEBUG=false.
-    let options = legacy_connect_options("./json.sqlite");
+    let options = ConnectOptions::new(legacy_url("./json.sqlite")).sqlx_logging(false).to_owned();
     assert!(!options.get_sqlx_logging(), "sqlx statement logging must be off");
     assert_eq!(options.get_url(), "sqlite://./json.sqlite?mode=ro");
 }

@@ -193,36 +193,9 @@ pub fn format_uptime(locale: &LanguageIdentifier, uptime: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::migrations::Migrator;
-    use sea_orm::{ActiveModelTrait, ConnectOptions, Database, DatabaseConnection};
-    use sea_orm_migration::MigratorTrait;
+    use crate::domain::test_support::{fresh_db, insert_guild, now};
+    use sea_orm::{ActiveModelTrait, DatabaseConnection};
     use uuid::Uuid;
-
-    async fn fresh_db() -> DatabaseConnection {
-        // Single connection: each pooled connection to `sqlite::memory:`
-        // would otherwise get its own private database.
-        let mut options = ConnectOptions::new("sqlite::memory:");
-        options.max_connections(1).sqlx_logging(false);
-        let db = Database::connect(options).await.expect("connect to in-memory sqlite");
-        Migrator::fresh(&db).await.expect("apply migrations");
-        db
-    }
-
-    fn now() -> chrono::NaiveDateTime {
-        chrono::Utc::now().naive_utc()
-    }
-
-    async fn seed_guild(db: &DatabaseConnection, id: i64) {
-        guilds::ActiveModel {
-            id: Set(id),
-            is_safe: Set(true),
-            created_at: Set(now()),
-            updated_at: Set(now()),
-        }
-        .insert(db)
-        .await
-        .expect("seed guild");
-    }
 
     async fn seed_trophy(db: &DatabaseConnection, guild_id: i64, name: &str) -> Uuid {
         let id = Uuid::now_v7();
@@ -301,8 +274,8 @@ mod tests {
     #[tokio::test]
     async fn snapshot_counts_live_rows_and_reads_total_counter() {
         let db = fresh_db().await;
-        seed_guild(&db, 100).await;
-        seed_guild(&db, 200).await;
+        insert_guild(&db, 100).await;
+        insert_guild(&db, 200).await;
         let gold = seed_trophy(&db, 100, "Gold").await;
         seed_trophy(&db, 200, "Silver").await;
         // Duplicate awards of the same trophy are counted individually.

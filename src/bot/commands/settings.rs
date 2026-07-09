@@ -274,6 +274,13 @@ pub(crate) fn render_list_body(
     ALL_SETTINGS
         .iter()
         .map(|&setting| {
+            let current_index = match setting {
+                Setting::DedicationDisplay => effective.dedication_display,
+                Setting::StackRoles => effective.stack_roles,
+                Setting::HideUnusedTrophies => effective.hide_unused_trophies,
+                Setting::HideQuitUsers => effective.hide_quit_users,
+                Setting::LeaderboardFormat => effective.leaderboard_format,
+            };
             let options = format!("`{}`", option_labels(locale, setting).join("`, `"));
             [
                 i18n::t_args(
@@ -283,7 +290,7 @@ pub(crate) fn render_list_body(
                         ("name", setting_name(locale, setting).into()),
                         (
                             "current",
-                            option_label(locale, setting, effective.get(setting)).into(),
+                            option_label(locale, setting, current_index).into(),
                         ),
                     ],
                 ),

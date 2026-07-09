@@ -30,7 +30,10 @@ impl LegacyData {
     /// Loads and parses both documents from the quick.db SQLite file at `path`
     /// (a filesystem path, e.g. `./json.sqlite`).
     pub async fn load(path: &str) -> Result<Self> {
-        let options = legacy_connect_options(path);
+        // sqlx statement logging is disabled (it defaults to INFO) so `import`
+        // does not interleave raw quick.db SQL with the report operators must
+        // review, regardless of `DEBUG`.
+        let options = ConnectOptions::new(legacy_url(path)).sqlx_logging(false).to_owned();
         let url = options.get_url().to_owned();
         let db = Database::connect(options)
             .await
@@ -84,13 +87,6 @@ impl LegacyData {
         stats.insert("rootTrophies".to_owned(), self.bot.trophies);
         stats
     }
-}
-
-/// Connection options for the legacy quick.db file. sqlx statement logging is
-/// disabled (it defaults to INFO) so `import` does not interleave raw quick.db
-/// SQL with the report operators must review, regardless of `DEBUG`.
-fn legacy_connect_options(path: &str) -> ConnectOptions {
-    ConnectOptions::new(legacy_url(path)).sqlx_logging(false).to_owned()
 }
 
 /// Builds the SQLite connection URL for the legacy quick.db file, enforcing

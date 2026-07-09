@@ -395,27 +395,20 @@ fn prepare_trophy(
             false
         }
     };
-    let details = match &t.details {
-        Some(details) => details.clone(),
-        None => {
-            note_default(report, guild_id, legacy_id, "details");
-            DEFAULT_DETAILS.to_owned()
+    // Same shape for the three optional strings: use the legacy value, or fall
+    // back to the column default while reporting the applied default.
+    let mut str_or_default = |opt: &Option<String>, field: &'static str, default: &str| -> String {
+        match opt {
+            Some(value) => value.clone(),
+            None => {
+                note_default(report, guild_id, legacy_id, field);
+                default.to_owned()
+            }
         }
     };
-    let description = match &t.description {
-        Some(description) => description.clone(),
-        None => {
-            note_default(report, guild_id, legacy_id, "description");
-            DEFAULT_DESCRIPTION.to_owned()
-        }
-    };
-    let emoji = match &t.emoji {
-        Some(emoji) => emoji.clone(),
-        None => {
-            note_default(report, guild_id, legacy_id, "emoji");
-            DEFAULT_EMOJI.to_owned()
-        }
-    };
+    let details = str_or_default(&t.details, "details", DEFAULT_DETAILS);
+    let description = str_or_default(&t.description, "description", DEFAULT_DESCRIPTION);
+    let emoji = str_or_default(&t.emoji, "emoji", DEFAULT_EMOJI);
 
     // f64::round rounds half-way cases away from zero — exactly the spec rule.
     // A rounded value outside the schema CHECK range (±999,999; defense, 0 in

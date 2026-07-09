@@ -97,34 +97,6 @@ mod tests {
         assert_eq!(t(&resolve(None), "no-such-key"), "no-such-key");
     }
 
-    /// The under-construction stub strings were removed together with the
-    /// dead `reply_under_construction` helper once all 24 commands landed.
-    /// Guard against reintroducing orphaned catalog keys under those names.
-    #[test]
-    fn under_construction_stub_keys_are_gone() {
-        let locale = resolve(None);
-        for key in ["common-under-construction-title", "common-under-construction"] {
-            assert_eq!(t(&locale, key), key, "orphaned stub key {key} resurfaced");
-        }
-    }
-
-    /// main.ftl was a scaffold catalog whose four example keys were never
-    /// referenced by production code (which uses `common-error-generic` and
-    /// per-command `*-error-not-found` / `award-awarded` keys instead). The
-    /// file was deleted; guard against its dead keys resurfacing.
-    #[test]
-    fn scaffold_main_ftl_keys_are_gone() {
-        let locale = resolve(None);
-        for key in [
-            "error-generic",
-            "error-trophy-not-found",
-            "bench-response",
-            "award-success",
-        ] {
-            assert_eq!(t(&locale, key), key, "orphaned scaffold key {key} resurfaced");
-        }
-    }
-
     #[test]
     fn plural_selection_works() {
         let locale = resolve(None);

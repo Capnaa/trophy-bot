@@ -4,7 +4,6 @@
 //! of a unique constraint on `(user_id, trophy_id)` (duplicates required),
 //! CHECK constraints, FK `ON DELETE CASCADE`, and `down()` rollback.
 
-use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
     NotSet, Set,
@@ -12,26 +11,11 @@ use sea_orm::{
 use sea_orm_migration::MigratorTrait;
 use uuid::Uuid;
 
+use crate::domain::test_support::{fresh_db, now};
 use crate::entities::{
     bot_stats, guild_settings, guilds, leaderboard_panels, role_rewards, trophies, user_trophies,
 };
 use crate::migrations::{run_schema_command, MigrateSubcommands, Migrator};
-
-async fn fresh_db() -> DatabaseConnection {
-    // A single connection is required: every pooled connection to
-    // `sqlite::memory:` would otherwise get its own private database.
-    let mut options = ConnectOptions::new("sqlite::memory:");
-    options.max_connections(1).sqlx_logging(false);
-    let db = Database::connect(options)
-        .await
-        .expect("connect to in-memory sqlite");
-    Migrator::fresh(&db).await.expect("apply migrations");
-    db
-}
-
-fn now() -> chrono::NaiveDateTime {
-    Utc::now().naive_utc()
-}
 
 async fn insert_guild(db: &DatabaseConnection, id: i64) -> guilds::Model {
     guilds::ActiveModel {

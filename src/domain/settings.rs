@@ -4,6 +4,7 @@
 //! `getSetting` semantics (`??`, so a stored 0 is respected).
 
 use sea_orm::{ConnectionTrait, DbErr, EntityTrait};
+use serde::Serialize;
 
 use crate::entities::guild_settings;
 
@@ -56,7 +57,10 @@ impl Setting {
 /// NULL-falls-back-to-default logic as [`get_setting`]. Use this when a
 /// command needs more than one setting (e.g. leaderboard needs
 /// `hide_quit_users` + `leaderboard_format`) so only one row query runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Field order is load-bearing: the `/export` payload serializes this
+/// struct directly, so the five fields must stay in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct EffectiveSettings {
     pub dedication_display: i16,
     pub stack_roles: i16,
@@ -73,17 +77,6 @@ impl EffectiveSettings {
             hide_unused_trophies: Setting::HideUnusedTrophies.resolve(row),
             hide_quit_users: Setting::HideQuitUsers.resolve(row),
             leaderboard_format: Setting::LeaderboardFormat.resolve(row),
-        }
-    }
-
-    /// Field access by [`Setting`], mirroring [`get_setting`]'s shape.
-    pub fn get(&self, setting: Setting) -> i16 {
-        match setting {
-            Setting::DedicationDisplay => self.dedication_display,
-            Setting::StackRoles => self.stack_roles,
-            Setting::HideUnusedTrophies => self.hide_unused_trophies,
-            Setting::HideQuitUsers => self.hide_quit_users,
-            Setting::LeaderboardFormat => self.leaderboard_format,
         }
     }
 }
@@ -289,9 +282,16 @@ mod tests {
         .expect("insert settings row");
 
         let all = effective_settings(&db, 1).await.expect("read settings");
+        let by_field = |setting| match setting {
+            Setting::DedicationDisplay => all.dedication_display,
+            Setting::StackRoles => all.stack_roles,
+            Setting::HideUnusedTrophies => all.hide_unused_trophies,
+            Setting::HideQuitUsers => all.hide_quit_users,
+            Setting::LeaderboardFormat => all.leaderboard_format,
+        };
         for setting in ALL {
             assert_eq!(
-                all.get(setting),
+                by_field(setting),
                 get_setting(&db, 1, setting).await.unwrap(),
                 "{setting:?}"
             );

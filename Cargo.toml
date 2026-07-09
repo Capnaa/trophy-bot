@@ -31,16 +31,9 @@ poise = "0.6"
 # i18n
 fluent-templates = "0.14"
 
-# Features for future expansion
-[features]
-default = []
-
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
 overflow-checks = true
-debug = false
-incremental = false
-debug-assertions = false

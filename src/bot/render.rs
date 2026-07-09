@@ -86,21 +86,6 @@ impl LeaderboardFormat {
     }
 }
 
-/// Clamped pagination bounds (F14): `page` is always within `[1, last]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PageBounds {
-    pub page: usize,
-    pub last: usize,
-}
-
-/// Clamps a requested page (raw slash-command input: may be 0, negative or
-/// past the end) into valid bounds for a list of `len` entries.
-pub fn clamp_page(requested: i64, len: usize) -> PageBounds {
-    let last = len.div_ceil(PER_PAGE).max(1);
-    let page = requested.clamp(1, last as i64) as usize;
-    PageBounds { page, last }
-}
-
 /// Medal for a global rank: 🥇🥈🥉 for 1-3, generic medal otherwise
 /// (legacy `getMedal`).
 pub fn medal(rank: usize) -> &'static str {
@@ -175,13 +160,8 @@ pub(crate) fn page_slice_ids(
     requested_page: i64,
 ) -> Vec<i64> {
     let visible = visible_users(board, membership, hide_quit_users);
-    let bounds = clamp_page(requested_page, visible.len());
-    visible
-        .iter()
-        .skip((bounds.page - 1) * PER_PAGE)
-        .take(PER_PAGE)
-        .map(|(user_id, _)| *user_id)
-        .collect()
+    let (page, _, _) = util::paginate(&visible, PER_PAGE, requested_page);
+    page.iter().map(|(user_id, _)| *user_id).collect()
 }
 
 /// Pure view builder: filters, paginates (clamping first — F14), ranks and
@@ -200,13 +180,11 @@ pub fn build_view(
 
     let visible = visible_users(board, membership, hide_quit_users);
 
-    let bounds = clamp_page(requested_page, visible.len());
-    let start = (bounds.page - 1) * PER_PAGE;
+    let (page_slice, page, last) = util::paginate(&visible, PER_PAGE, requested_page);
+    let start = (page - 1) * PER_PAGE;
 
-    let rows = visible
+    let rows = page_slice
         .iter()
-        .skip(start)
-        .take(PER_PAGE)
         .enumerate()
         .map(|(offset, (user_id, score))| {
             let rank = start + offset + 1;
@@ -231,8 +209,8 @@ pub fn build_view(
     BoardView {
         total_score,
         rows,
-        page: bounds.page,
-        last: bounds.last,
+        page,
+        last,
     }
 }
 
@@ -470,31 +448,6 @@ mod tests {
             nickname: nickname.map(str::to_string),
             tag: tag.to_string(),
         }
-    }
-
-    // --- F14: page clamping ---
-
-    #[test]
-    fn clamp_page_zero_and_negative_become_first_page() {
-        assert_eq!(clamp_page(0, 25), PageBounds { page: 1, last: 3 });
-        assert_eq!(clamp_page(-3, 25), PageBounds { page: 1, last: 3 });
-    }
-
-    #[test]
-    fn clamp_page_past_the_end_becomes_last_page() {
-        assert_eq!(clamp_page(999, 15), PageBounds { page: 2, last: 2 });
-    }
-
-    #[test]
-    fn clamp_page_exact_boundaries() {
-        assert_eq!(clamp_page(1, 10), PageBounds { page: 1, last: 1 });
-        assert_eq!(clamp_page(2, 11), PageBounds { page: 2, last: 2 });
-    }
-
-    #[test]
-    fn clamp_page_empty_list_is_a_single_page() {
-        assert_eq!(clamp_page(1, 0), PageBounds { page: 1, last: 1 });
-        assert_eq!(clamp_page(42, 0), PageBounds { page: 1, last: 1 });
     }
 
     // --- medals ---

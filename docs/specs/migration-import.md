@@ -82,3 +82,14 @@ cargo run -- import                         # full import + report
 3. `trophy-bot up` (schema) → `trophy-bot import` (data) → review report against the expected counts above.
 4. Start Rust bot; smoke-test create/award/leaderboard/show on a test guild. Note: in guilds where the bot has Administrator, legacy role rewards were LIVE (see core-behaviors.md) — the first score change per user recomputes their reward roles idempotently; expect visible role adjustments mainly in guilds where the feature was dead.
 5. Rollback window 24h: Node.js bot + backup remain deployable untouched.
+
+## Pre-cutover checklist
+
+Carried over from the migration review sign-off (all F1–F37 fixes and the review's 38 findings are resolved; these are the remaining forward-looking gates before the real cutover):
+
+1. **PostgreSQL validation run** — the importer is proven only on SQLite (ADR 0003 entrusts portability to SeaORM). Do a full schema + import + report run against a real PostgreSQL instance and compare to the expected counts above BEFORE cutover.
+2. **Live Discord smoke** — run `trophy-bot smoke`, or the manual flow (create → award → leaderboard → show → delete-confirm → forgetme-cancel) plus one missing-permissions error path to see the localized embeds, on a test guild.
+3. **Human sign-off on the import report** — review tombstones, renames, rounded values, images, deduped rewards, and the 133 score mismatches (not reconciled by design, ADR 0006).
+4. **Announce the behavior deltas** — `/delete` and `/forgetme` confirmations expire after 60 s; `/rewards remove` uses autocomplete; members granted command access purely via Integrations overrides (without Manage Guild) are now refused (rust-parity-plan.md §4).
+5. **Keep the rollback path warm** — Node.js bot + timestamped `json.sqlite` backup deployable for the 24 h window.
+6. **Follow-up** — add `cli.rs` arg-parsing tests once the smoke-subcommand work settles (deferred during the review).

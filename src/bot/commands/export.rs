@@ -72,7 +72,7 @@ pub struct GuildExport {
     pub exported_at: NaiveDateTime,
     pub guild: GuildInfo,
     /// Effective settings (stored value, or the default when unset).
-    pub settings: SettingsExport,
+    pub settings: EffectiveSettings,
     pub trophies: Vec<TrophyExport>,
     pub awards: Vec<AwardExport>,
     pub rewards: Vec<RewardExport>,
@@ -83,27 +83,6 @@ pub struct GuildExport {
 pub struct GuildInfo {
     pub id: String,
     pub is_safe: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SettingsExport {
-    pub dedication_display: i16,
-    pub stack_roles: i16,
-    pub hide_unused_trophies: i16,
-    pub hide_quit_users: i16,
-    pub leaderboard_format: i16,
-}
-
-impl From<EffectiveSettings> for SettingsExport {
-    fn from(s: EffectiveSettings) -> Self {
-        Self {
-            dedication_display: s.dedication_display,
-            stack_roles: s.stack_roles,
-            hide_unused_trophies: s.hide_unused_trophies,
-            hide_quit_users: s.hide_quit_users,
-            leaderboard_format: s.leaderboard_format,
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]
@@ -237,7 +216,7 @@ pub async fn build_export(
             id: guild_id.to_string(),
             is_safe: guild_row.is_some_and(|g| g.is_safe),
         },
-        settings: effective.into(),
+        settings: effective,
         trophies: trophy_rows.into_iter().map(Into::into).collect(),
         awards: award_rows.into_iter().map(Into::into).collect(),
         rewards: reward_rows.into_iter().map(Into::into).collect(),
