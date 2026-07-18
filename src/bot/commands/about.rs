@@ -43,6 +43,9 @@ mod tests {
             description.contains(env!("CARGO_PKG_VERSION")),
             "got: {description}"
         );
-        assert!(description.contains("github.com"), "got: {description}");
+        assert!(
+            description.contains("github.com/Capnaa/trophy-bot"),
+            "got: {description}"
+        );
     }
 }
