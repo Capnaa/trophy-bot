@@ -103,7 +103,7 @@ pub(crate) fn format_dedication(
 /// the in-server flag and the nick-aware display name), then — only when a
 /// name is actually needed (mode 1) — a global user fetch for people who
 /// left. Every failure is swallowed: display falls back gracefully (F36).
-async fn live_member_info(
+pub(crate) async fn live_member_info(
     ctx: &Context<'_>,
     guild_id: serenity::GuildId,
     user_id: i64,
@@ -220,7 +220,11 @@ pub async fn show(
     }
 
     let components = vec![serenity::CreateActionRow::Buttons(vec![
-        serenity::CreateButton::new(buttons::show_holders_custom_id(model.id))
+        serenity::CreateButton::new(buttons::show_holders_custom_id(
+            model.id,
+            buttons::ShowHoldersAction::Show,
+            ctx.author().id.get(),
+        ))
             .style(serenity::ButtonStyle::Primary)
             .label(i18n::t(&locale, "show-button-holders")),
     ])];

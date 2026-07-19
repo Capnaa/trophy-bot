@@ -28,7 +28,7 @@ mod ping;
 pub(crate) mod revoke;
 pub(crate) mod rewards;
 mod settings;
-mod show;
+pub(crate) mod show;
 // `pub(crate)` so the framework's `post_command` hook (src/bot/mod.rs) can
 // reach `stats::record_successful_run` for the success-only run counters.
 pub(crate) mod stats;

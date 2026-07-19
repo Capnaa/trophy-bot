@@ -2,14 +2,16 @@
 //! `FrameworkOptions::event_handler` (see `src/bot/mod.rs`).
 //!
 //! Two confirmation flows live here: `/forgetme` (batch C16, F33) and the
-//! destructive `/delete` (spec Rust target, rust-parity-plan §4). Both are
-//! **stateless**: everything a press needs is encoded in the button's custom
-//! id (`forgetme:{action}:{unix}` / `trophy-delete:{action}:{unix}:{invoker}:
-//! {trophy_uuid}`), and a press more than [`CONFIRM_TIMEOUT_SECS`] after
-//! issuance is rejected — the message loses its buttons and shows an
-//! "expired" notice instead of acting. No in-memory state survives a restart
-//! or is needed at all. Legacy buttons never expired (and legacy /delete had
-//! no confirmation at all); both are intentional, documented deltas
+//! destructive `/delete` (spec Rust target, rust-parity-plan §4), plus the
+//! `/show` holders toggle. All are **stateless**: everything a press needs is
+//! encoded in the button's custom id (`forgetme:{action}:{unix}` /
+//! `trophy-delete:{action}:{unix}:{invoker}:{trophy_uuid}` /
+//! `trophy-show-holders:{trophy_uuid}:{action}:{invoker}`), so a restart
+//! needs no in-memory state at all. The confirmation flows additionally
+//! reject a press more than [`CONFIRM_TIMEOUT_SECS`] after issuance — the
+//! message loses its buttons and shows an "expired" notice instead of
+//! acting. Legacy buttons never expired (and legacy /delete had no
+//! confirmation at all); both are intentional, documented deltas
 //! (rust-parity-plan.md §4) announced in the warning embeds themselves.
 //!
 //! Every press is acknowledged (`CreateInteractionResponse::Acknowledge`,
@@ -23,6 +25,8 @@
 //! reply): the handler always returns `Ok` so the framework's generic error
 //! path (which has no interaction context for events) is never needed.
 
+use std::path::Path;
+
 use poise::serenity_prelude as serenity;
 use sea_orm::{
     ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, TransactionSession,
@@ -30,7 +34,7 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-use crate::bot::commands::delete;
+use crate::bot::commands::{delete, show};
 use crate::bot::{images, reward_apply, util, Data, Error};
 use crate::entities::{guilds, trophies, user_trophies};
 use crate::i18n;
@@ -119,15 +123,39 @@ pub(crate) fn press_outcome(
 /// Custom-id namespace for /show holders buttons.
 const SHOW_HOLDERS_PREFIX: &str = "trophy-show-holders";
 
-/// Builds the custom id for a /show holders button: `trophy-show-holders:{trophy_uuid}`.
-pub(crate) fn show_holders_custom_id(trophy_id: Uuid) -> String {
-    format!("{SHOW_HOLDERS_PREFIX}:{trophy_id}")
+/// Whether the /show holders button should show or hide the extra section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShowHoldersAction {
+    Show,
+    Hide,
 }
 
-/// Parses a component custom id back into the trophy id for the /show holders button.
-pub(crate) fn parse_show_holders_custom_id(id: &str) -> Option<Uuid> {
+/// Builds the custom id for a /show holders button:
+/// `trophy-show-holders:{trophy_uuid}:{show|hide}:{invoker_id}`.
+pub(crate) fn show_holders_custom_id(
+    trophy_id: Uuid,
+    action: ShowHoldersAction,
+    invoker_id: u64,
+) -> String {
+    let action_name = match action {
+        ShowHoldersAction::Show => "show",
+        ShowHoldersAction::Hide => "hide",
+    };
+    format!("{SHOW_HOLDERS_PREFIX}:{trophy_id}:{action_name}:{invoker_id}")
+}
+
+/// Parses a component custom id back into the trophy id, action, and
+/// original invoker for the /show holders button.
+pub(crate) fn parse_show_holders_custom_id(id: &str) -> Option<(Uuid, ShowHoldersAction, u64)> {
     let rest = id.strip_prefix(SHOW_HOLDERS_PREFIX)?.strip_prefix(':')?;
-    Uuid::parse_str(rest).ok()
+    let (trophy, rest) = rest.split_once(':')?;
+    let (action, invoker_id) = rest.split_once(':')?;
+    let action = match action {
+        "show" => ShowHoldersAction::Show,
+        "hide" => ShowHoldersAction::Hide,
+        _ => return None,
+    };
+    Some((Uuid::parse_str(trophy).ok()?, action, invoker_id.parse().ok()?))
 }
 
 /// Custom-id namespace for /delete confirmation buttons.
@@ -255,8 +283,13 @@ pub async fn handle_event(
 
     let result = if let Some((button, issued_at)) = parse_custom_id(&component.data.custom_id) {
         ("forgetme", handle_forgetme(ctx, component, data, button, issued_at).await)
-    } else if let Some(trophy_id) = parse_show_holders_custom_id(&component.data.custom_id) {
-        ("show-holders", handle_show_holders(ctx, component, data, trophy_id).await)
+    } else if let Some((trophy_id, action, invoker_id)) =
+        parse_show_holders_custom_id(&component.data.custom_id)
+    {
+        (
+            "show-holders",
+            handle_show_holders(ctx, component, data, trophy_id, action, invoker_id).await,
+        )
     } else if let Some((button, issued_at, invoker_id, trophy_id)) =
         parse_delete_custom_id(&component.data.custom_id)
     {
@@ -295,6 +328,8 @@ async fn handle_show_holders(
     component: &serenity::ComponentInteraction,
     data: &Data,
     trophy_id: Uuid,
+    action: ShowHoldersAction,
+    invoker_id: u64,
 ) -> anyhow::Result<()> {
     let locale = i18n::resolve(Some(&component.locale));
     let Some(guild_id) = component.guild_id else {
@@ -304,6 +339,15 @@ async fn handle_show_holders(
     component
         .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
         .await?;
+
+    if component.user.id.get() != invoker_id {
+        let reply = ephemeral_followup(error_embed(
+            &locale,
+            i18n::t(&locale, "show-holders-not-invoker"),
+        ));
+        component.create_followup(&ctx.http, reply).await?;
+        return Ok(());
+    }
 
     let trophy = trophies::Entity::find_by_id(trophy_id)
         .filter(trophies::Column::GuildId.eq(guild_id.get() as i64))
@@ -315,39 +359,95 @@ async fn handle_show_holders(
             .description(i18n::t(&locale, "show-holders-missing"))
             .colour(util::COLOR_ERROR);
         component
-            .edit_response(&ctx.http, replace_message(embed))
+            .edit_response(&ctx.http, replace_message(embed, vec![]))
             .await?;
         return Ok(());
     };
 
-    let holders = user_trophies::Entity::find()
-        .filter(user_trophies::Column::GuildId.eq(guild_id.get() as i64))
-        .filter(user_trophies::Column::TrophyId.eq(trophy_id))
-        .order_by_desc(user_trophies::Column::AwardedAt)
-        .all(&data.db)
-        .await?;
+    let dedication = trophy.dedication_user_id.map(|user_id| format!("<@{user_id}>"));
+    let dedication = dedication.or_else(|| trophy.dedication_text.clone());
 
-    let lines = if holders.is_empty() {
-        vec![i18n::t(&locale, "show-holders-empty")]
-    } else {
-        holders
-            .into_iter()
-            .map(|row| {
-                let user = row.user_id.to_string();
-                let when = row.awarded_at.format("%Y-%m-%d %H:%M").to_string();
-                format!("<@{user}> — {when}")
-            })
-            .collect::<Vec<_>>()
+    let image = show::plan_image(Path::new(images::IMAGES_DIR), trophy.image.as_deref()).await;
+
+    let mut embed = serenity::CreateEmbed::new()
+        .title(format!("{} {}", trophy.emoji, trophy.name))
+        .url("https://www.youtube.com/watch?v=04854XqcfCY")
+        .description(trophy.description.clone())
+        .colour(util::COLOR_MAIN)
+        .field(
+            i18n::t(&locale, "show-field-value"),
+            i18n::t_args(&locale, "show-value", &[("value", i64::from(trophy.value).into())]),
+            true,
+        )
+        .footer(serenity::CreateEmbedFooter::new(i18n::t_args(
+            &locale,
+            "show-footer",
+            &[("name", trophy.name.clone().into())],
+        )));
+
+    if trophy.signed && let Some(creator) = trophy.creator_user_id {
+        embed = embed.field(i18n::t(&locale, "show-field-signed"), format!("<@{creator}>"), true);
+    }
+    if let Some(dedicated_to) = dedication {
+        embed = embed.field(i18n::t(&locale, "show-field-dedicated"), dedicated_to, true);
+    }
+
+    let mut embeds = vec![embed];
+    let next_action = match action {
+        ShowHoldersAction::Show => ShowHoldersAction::Hide,
+        ShowHoldersAction::Hide => ShowHoldersAction::Show,
     };
 
-    let description = lines.join("\n");
-    let embed = serenity::CreateEmbed::new()
-        .title(format!("{} {}", trophy.emoji, trophy.name))
-        .description(description)
-        .colour(util::COLOR_MAIN);
-    component
-        .edit_response(&ctx.http, replace_message(embed))
-        .await?;
+    if action == ShowHoldersAction::Show {
+        let holders = user_trophies::Entity::find()
+            .filter(user_trophies::Column::GuildId.eq(guild_id.get() as i64))
+            .filter(user_trophies::Column::TrophyId.eq(trophy_id))
+            .order_by_desc(user_trophies::Column::AwardedAt)
+            .all(&data.db)
+            .await?;
+
+        let lines = if holders.is_empty() {
+            vec![i18n::t(&locale, "show-holders-empty")]
+        } else {
+            holders
+                .into_iter()
+                .map(|row| {
+                    let user = row.user_id.to_string();
+                    let when = row.awarded_at.format("%Y-%m-%d %H:%M").to_string();
+                    format!("<@{user}> — {when}")
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let holders_embed = serenity::CreateEmbed::new()
+            .title(i18n::t(&locale, "show-holders-section-title"))
+            .description(lines.join("\n"))
+            .colour(util::COLOR_MAIN);
+        embeds.push(holders_embed);
+    }
+
+    let button_row = serenity::CreateActionRow::Buttons(vec![serenity::CreateButton::new(
+        show_holders_custom_id(trophy_id, next_action, invoker_id),
+    )
+    .style(serenity::ButtonStyle::Primary)
+    .label(i18n::t(
+        &locale,
+        match next_action {
+            ShowHoldersAction::Show => "show-button-holders",
+            ShowHoldersAction::Hide => "show-button-hide-holders",
+        },
+    ))]);
+
+    let mut edit = serenity::EditInteractionResponse::new()
+        .embeds(embeds)
+        .components(vec![button_row]);
+    if let show::ImagePlan::Attachment { filename, bytes } = image {
+        edit = edit.attachments(serenity::EditAttachments::new().add(
+            serenity::CreateAttachment::bytes(bytes, filename),
+        ));
+    }
+
+    component.edit_response(&ctx.http, edit).await?;
     Ok(())
 }
 
@@ -394,7 +494,7 @@ async fn handle_trophy_delete(
                 .description(i18n::t(&locale, "delete-expired"))
                 .colour(util::COLOR_ERROR);
             component
-                .edit_response(&ctx.http, replace_message(embed))
+                .edit_response(&ctx.http, replace_message(embed, vec![]))
                 .await?;
         }
         DeletePressOutcome::Cancelled => {
@@ -403,7 +503,7 @@ async fn handle_trophy_delete(
                 .description(i18n::t(&locale, "delete-cancelled"))
                 .colour(util::COLOR_MAIN);
             component
-                .edit_response(&ctx.http, replace_message(embed))
+                .edit_response(&ctx.http, replace_message(embed, vec![]))
                 .await?;
         }
         DeletePressOutcome::Delete => {
@@ -420,7 +520,7 @@ async fn handle_trophy_delete(
                     .description(i18n::t(&locale, "delete-gone"))
                     .colour(util::COLOR_ERROR);
                 component
-                    .edit_response(&ctx.http, replace_message(embed))
+                    .edit_response(&ctx.http, replace_message(embed, vec![]))
                     .await?;
                 return Ok(());
             };
@@ -443,7 +543,7 @@ async fn handle_trophy_delete(
                     ],
                 ));
             if let Err(err) = component
-                .edit_response(&ctx.http, replace_message(embed))
+                .edit_response(&ctx.http, replace_message(embed, vec![]))
                 .await
             {
                 log::error!(
@@ -542,7 +642,7 @@ async fn handle_forgetme(
                 .description(i18n::t(&locale, "forgetme-expired"))
                 .colour(util::COLOR_ERROR);
             component
-                .edit_response(&ctx.http, replace_message(embed))
+                .edit_response(&ctx.http, replace_message(embed, vec![]))
                 .await?;
         }
         PressOutcome::Cancelled => {
@@ -551,7 +651,7 @@ async fn handle_forgetme(
                 .description(i18n::t(&locale, "forgetme-cancelled"))
                 .colour(util::COLOR_MAIN);
             component
-                .edit_response(&ctx.http, replace_message(embed))
+                .edit_response(&ctx.http, replace_message(embed, vec![]))
                 .await?;
         }
         PressOutcome::Purge => {
@@ -569,7 +669,7 @@ async fn handle_forgetme(
                 .description(i18n::t(&locale, "forgetme-goodbye"))
                 .colour(util::COLOR_MAIN);
             if let Err(err) = component
-                .edit_response(&ctx.http, replace_message(embed))
+                .edit_response(&ctx.http, replace_message(embed, vec![]))
                 .await
             {
                 log::error!(
@@ -623,10 +723,11 @@ fn ephemeral_followup(embed: serenity::CreateEmbed) -> serenity::CreateInteracti
 
 /// Edit that replaces the button message with `embed` and strips all
 /// components (follows the initial `Acknowledge` deferred update).
-fn replace_message(embed: serenity::CreateEmbed) -> serenity::EditInteractionResponse {
-    serenity::EditInteractionResponse::new()
-        .embed(embed)
-        .components(vec![])
+fn replace_message(
+    embed: serenity::CreateEmbed,
+    components: Vec<serenity::CreateActionRow>,
+) -> serenity::EditInteractionResponse {
+    serenity::EditInteractionResponse::new().embed(embed).components(components)
 }
 
 #[cfg(test)]
@@ -636,9 +737,24 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn show_holders_custom_id_round_trips() {
+    fn show_holders_toggle_custom_id_round_trips() {
         let trophy = Uuid::now_v7();
-        assert_eq!(parse_show_holders_custom_id(&show_holders_custom_id(trophy)), Some(trophy));
+        assert_eq!(
+            parse_show_holders_custom_id(&show_holders_custom_id(
+                trophy,
+                ShowHoldersAction::Show,
+                42
+            )),
+            Some((trophy, ShowHoldersAction::Show, 42))
+        );
+        assert_eq!(
+            parse_show_holders_custom_id(&show_holders_custom_id(
+                trophy,
+                ShowHoldersAction::Hide,
+                42
+            )),
+            Some((trophy, ShowHoldersAction::Hide, 42))
+        );
     }
 
     use crate::domain::normalize::normalize_name;
@@ -915,6 +1031,20 @@ mod tests {
             "delete-expired",
             "delete-gone-title",
             "delete-gone",
+        ] {
+            assert_ne!(i18n::t(&locale, key), key, "missing Fluent key {key}");
+        }
+    }
+
+    #[test]
+    fn show_holders_flow_catalog_messages_exist() {
+        let locale = i18n::resolve(None);
+        for key in [
+            "show-holders-not-invoker",
+            "show-holders-missing-title",
+            "show-holders-missing",
+            "show-holders-empty",
+            "show-holders-section-title",
         ] {
             assert_ne!(i18n::t(&locale, key), key, "missing Fluent key {key}");
         }
