@@ -12,5 +12,9 @@ edit-change-emoji = **Emoji:** { $old } → { $new }
 edit-change-dedication = **Dedication:** { $old } → { $new }
 edit-change-details = **Details:** { $old } → { $new }
 edit-change-image = **Image:** updated
-# Shown in the dedication change line when there is no dedication on that side.
+edit-change-category = **Category:** { $old } → { $new }
+edit-change-active = **Active:** { $old } → { $new }
+# Shown in the dedication/category change lines when there is nothing on that side.
 edit-dedication-none = (none)
+edit-active-yes = Yes
+edit-active-no = No

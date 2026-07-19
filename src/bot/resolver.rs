@@ -141,6 +141,36 @@ pub async fn autocomplete_trophy(ctx: Context<'_>, partial: &str) -> Vec<String>
     }
 }
 
+/// Same as [`autocomplete_trophy`] but restricted to `active = true` trophies
+/// — used only by `/award`'s `trophy` option, so an inactive medal never
+/// shows up as a suggestion. Every other command keeps the unrestricted
+/// autocomplete: inactive medals stay fully manageable and visible.
+pub async fn autocomplete_active_trophy(ctx: Context<'_>, partial: &str) -> Vec<String> {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Vec::new();
+    };
+    let names: Result<Vec<(String, String)>, DbErr> = trophies::Entity::find()
+        .filter(trophies::Column::GuildId.eq(guild_id.get() as i64))
+        .filter(trophies::Column::Active.eq(true))
+        .select_only()
+        .column(trophies::Column::Name)
+        .column(trophies::Column::NormalizedName)
+        .order_by_asc(trophies::Column::Name)
+        .into_tuple()
+        .all(&ctx.data().db)
+        .await;
+    match names {
+        Ok(names) => prefix_choices(&names, partial),
+        Err(err) => {
+            log::warn!(
+                "active trophy autocomplete query failed (guild={}): {err}",
+                guild_id.get()
+            );
+            Vec::new()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +182,15 @@ mod tests {
 
     /// Inserts a trophy, auto-creating the guild row the FK needs.
     async fn insert_trophy(db: &DatabaseConnection, guild_id: i64, name: &str) -> Uuid {
+        insert_trophy_active(db, guild_id, name, true).await
+    }
+
+    async fn insert_trophy_active(
+        db: &DatabaseConnection,
+        guild_id: i64,
+        name: &str,
+        active: bool,
+    ) -> Uuid {
         if guilds::Entity::find_by_id(guild_id).one(db).await.unwrap().is_none() {
             insert_guild(db, guild_id).await;
         }
@@ -171,6 +210,8 @@ mod tests {
             dedication_text: Set(None),
             details: Set("No details provided.".to_string()),
             signed: Set(false),
+            category: Set(None),
+            active: Set(active),
             created_at: Set(now()),
             updated_at: Set(now()),
         }

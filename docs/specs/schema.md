@@ -30,6 +30,8 @@ Conventions: all tables carry `created_at` / `updated_at` timestamps maintained 
 | dedication_text | varchar(32) | NULL | set for text-only dedications AND alongside user dedications (stored name) |
 | details | varchar(300) | NOT NULL default text | |
 | signed | bool | NOT NULL default false | |
+| category | varchar(64) | NULL | free-text grouping label; NULL = uncategorized (does not appear on any category panel) |
+| active | bool | NOT NULL default true | inactive medals are excluded from `/award` (autocomplete + direct resolve) but stay visible everywhere else — `/show`, `/trophies`, existing holders |
 | created_at / updated_at | timestamp | NOT NULL | created_at = legacy `created` (ms) or synthetic |
 
 Indexes: `UNIQUE(guild_id, normalized_name)` (the ADR 0005 constraint), `(guild_id)`.
@@ -87,6 +89,19 @@ Indexes: `UNIQUE(guild_id, role_id)` (F22; importer dedupes the 7 legacy duplica
 | created_at / updated_at | timestamp | NOT NULL | updated_at doubles as "last successful render" for the F32 reconciliation sweep |
 
 461 rows at import; many stale (validated at first sweep, not at import).
+
+## active_medals_panels
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| id | UUID | PK | UUIDv7, app-generated |
+| guild_id | i64 | NOT NULL, FK guilds ON DELETE CASCADE | |
+| category | varchar(64) | NOT NULL | the `trophies.category` this panel is scoped to |
+| channel_id | i64 | NOT NULL | |
+| message_id | i64 | NOT NULL | |
+| created_at / updated_at | timestamp | NOT NULL | updated_at doubles as "last successful render" (same convention as leaderboard_panels) |
+
+Indexes: `UNIQUE(guild_id, category)` — one panel per category per guild (the multi-row analogue of `leaderboard_panels`' single-row-per-guild PK). Rendered content: every `trophies` row in that guild+category with `active = true`, name + description, no score data — a live catalog, not a leaderboard. Refreshed on trophy create/edit/delete (category, active, name, emoji or description changed), never on award/revoke/clear.
 
 ## bot_stats — key/value counters
 

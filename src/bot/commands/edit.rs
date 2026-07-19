@@ -56,6 +56,10 @@ pub(crate) struct EditRequest {
     pub details: Option<String>,
     /// New stored image filename when an attachment was provided.
     pub image: Option<String>,
+    /// `None` = option not provided; `Some(None)` = cleared (blank input);
+    /// `Some(Some(x))` = new category.
+    pub category: Option<Option<String>>,
+    pub active: Option<bool>,
 }
 
 /// One entry of the change report (F37: built only from REAL changes).
@@ -68,6 +72,8 @@ pub(crate) enum Change {
     Dedication { old: Option<String>, new: Option<String> },
     Details { old: String, new: String },
     Image,
+    Category { old: Option<String>, new: Option<String> },
+    Active { old: bool, new: bool },
 }
 
 /// The merged post-edit field values plus the change report.
@@ -81,6 +87,8 @@ pub(crate) struct EditPlan {
     pub dedication_text: Option<String>,
     pub details: String,
     pub image: Option<String>,
+    pub category: Option<String>,
+    pub active: bool,
     pub changes: Vec<Change>,
 }
 
@@ -164,6 +172,22 @@ pub(crate) fn plan_edit(current: &trophies::Model, request: EditRequest) -> Edit
         None => current.image.clone(),
     };
 
+    let category = match request.category {
+        Some(new) if new != current.category => {
+            changes.push(Change::Category { old: current.category.clone(), new: new.clone() });
+            new
+        }
+        _ => current.category.clone(),
+    };
+
+    let active = match request.active {
+        Some(new) if new != current.active => {
+            changes.push(Change::Active { old: current.active, new });
+            new
+        }
+        _ => current.active,
+    };
+
     EditPlan {
         normalized_name: normalize_name(&name),
         name,
@@ -173,6 +197,8 @@ pub(crate) fn plan_edit(current: &trophies::Model, request: EditRequest) -> Edit
         dedication_text,
         details,
         image,
+        category,
+        active,
         changes,
     }
 }
@@ -194,9 +220,22 @@ pub(crate) fn render_changes(locale: &LanguageIdentifier, changes: &[Change]) ->
                 new.as_deref().unwrap_or(&none),
             ),
             Change::Image => i18n::t(locale, "edit-change-image"),
+            Change::Category { old, new } => line(
+                locale,
+                "edit-change-category",
+                old.as_deref().unwrap_or(&none),
+                new.as_deref().unwrap_or(&none),
+            ),
+            Change::Active { old, new } => {
+                line(locale, "edit-change-active", &active_label(locale, *old), &active_label(locale, *new))
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn active_label(locale: &LanguageIdentifier, active: bool) -> String {
+    i18n::t(locale, if active { "edit-active-yes" } else { "edit-active-no" })
 }
 
 fn line(locale: &LanguageIdentifier, key: &str, old: &str, new: &str) -> String {
@@ -238,6 +277,8 @@ pub(crate) async fn apply_edit(
     active.dedication_text = Set(plan.dedication_text.clone());
     active.details = Set(plan.details.clone());
     active.image = Set(plan.image.clone());
+    active.category = Set(plan.category.clone());
+    active.active = Set(plan.active);
     active.updated_at = Set(chrono::Utc::now().naive_utc());
 
     match active.update(db).await {
@@ -326,6 +367,9 @@ pub async fn edit(
     dedication: Option<String>,
     #[description = "A new details text for the trophy"] details: Option<String>,
     #[description = "A new image for the trophy"] image: Option<serenity::Attachment>,
+    #[description = "A new category for the trophy. Use an empty string to clear it"]
+    category: Option<String>,
+    #[description = "Whether this medal can currently be awarded"] active: Option<bool>,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
     let guild_id = util::require_guild_id(&ctx)?.get() as i64;
@@ -349,6 +393,9 @@ pub async fn edit(
         dedication.as_deref(),
         details.as_deref(),
     ) {
+        return util::reply_error(ctx, err.message(&locale), true).await;
+    }
+    if let Err(err) = crate::bot::commands::create::validate_category(category.as_deref()) {
         return util::reply_error(ctx, err.message(&locale), true).await;
     }
 
@@ -401,6 +448,9 @@ pub async fn edit(
         Some(raw) => Some(resolve_dedication(&ctx, raw).await),
     };
 
+    // Empty/whitespace-only input clears the category; anything else sets it.
+    let category = category.map(|raw| (!raw.trim().is_empty()).then_some(raw));
+
     let request = EditRequest {
         name,
         description,
@@ -410,6 +460,8 @@ pub async fn edit(
         image: image_plan
             .as_ref()
             .map(|(_, ext)| images::filename(guild_id, current.id, ext)),
+        category,
+        active,
     };
     let plan = plan_edit(&current, request);
 
@@ -424,6 +476,7 @@ pub async fn edit(
     // writing it in place before the update would irrecoverably clobber the
     // old image if the update then failed.
     let old_image = current.image.clone();
+    let old_category = current.category.clone();
     let new_image = plan.image.clone().filter(|_| image_plan.is_some());
     let temp_image = new_image.as_deref().map(temp_filename);
     if let (Some((url, _)), Some(temp)) = (&image_plan, &temp_image)
@@ -455,6 +508,20 @@ pub async fn edit(
 
     if let (Some(temp), Some(new)) = (&temp_image, &new_image) {
         promote_image(temp, new).await;
+    }
+
+    // Refresh whichever category catalog panel(s) this edit could affect:
+    // the trophy's (possibly unchanged) current category — covers it
+    // gaining/losing active status and any name/emoji/description change —
+    // plus its OLD category too when the category itself changed (a medal
+    // moving out of one category's panel and into another's).
+    if let Some(category) = &updated.category {
+        ctx.data().medals_panel_signal.notify(guild_id, category.clone());
+    }
+    if old_category != updated.category
+        && let Some(category) = &old_category
+    {
+        ctx.data().medals_panel_signal.notify(guild_id, category.clone());
     }
 
     // The previous image file is orphaned once replaced by one with a
@@ -501,6 +568,8 @@ mod tests {
             dedication_text: None,
             details: "Old details".to_string(),
             signed: false,
+            category: None,
+            active: true,
             created_at: now(),
             updated_at: now(),
         }
@@ -545,6 +614,8 @@ mod tests {
                 dedication: Some((None, Some("mom".into()))),
                 details: Some("Old details".into()),
                 image: None,
+                category: None,
+                active: None,
             },
         );
         assert!(plan.changes.is_empty(), "changes: {:?}", plan.changes);
@@ -654,6 +725,55 @@ mod tests {
         // No attachment keeps the stored filename.
         let plan = plan_edit(&current, EditRequest::default());
         assert_eq!(plan.image.as_deref(), Some("1_old.png"));
+    }
+
+    #[test]
+    fn category_set_clear_and_no_op() {
+        let current = model(1, "Gold Medal"); // category: None
+
+        // Setting a category is a change.
+        let plan = plan_edit(
+            &current,
+            EditRequest { category: Some(Some("Government".into())), ..Default::default() },
+        );
+        assert_eq!(plan.category.as_deref(), Some("Government"));
+        assert_eq!(plan.changes, vec![Change::Category { old: None, new: Some("Government".into()) }]);
+
+        // Clearing an already-absent category is not a change.
+        let plan =
+            plan_edit(&current, EditRequest { category: Some(None), ..Default::default() });
+        assert!(plan.changes.is_empty());
+
+        // Setting the same category again is not a change.
+        let mut categorized = current.clone();
+        categorized.category = Some("Government".to_string());
+        let plan = plan_edit(
+            &categorized,
+            EditRequest { category: Some(Some("Government".into())), ..Default::default() },
+        );
+        assert!(plan.changes.is_empty());
+
+        // Clearing a set category is a change.
+        let plan =
+            plan_edit(&categorized, EditRequest { category: Some(None), ..Default::default() });
+        assert_eq!(plan.category, None);
+        assert_eq!(
+            plan.changes,
+            vec![Change::Category { old: Some("Government".into()), new: None }]
+        );
+    }
+
+    #[test]
+    fn active_toggle_and_no_op() {
+        let current = model(1, "Gold Medal"); // active: true
+
+        let plan = plan_edit(&current, EditRequest { active: Some(false), ..Default::default() });
+        assert!(!plan.active);
+        assert_eq!(plan.changes, vec![Change::Active { old: true, new: false }]);
+
+        // Same value is not a change.
+        let plan = plan_edit(&current, EditRequest { active: Some(true), ..Default::default() });
+        assert!(plan.changes.is_empty());
     }
 
     // --- render_changes (F37 formatting) ---
@@ -876,6 +996,10 @@ mod tests {
             "edit-change-details",
             "edit-change-image",
             "edit-dedication-none",
+            "edit-change-category",
+            "edit-change-active",
+            "edit-active-yes",
+            "edit-active-no",
         ] {
             assert_ne!(i18n::t_args(&locale, key, args), key, "missing ftl message: {key}");
         }

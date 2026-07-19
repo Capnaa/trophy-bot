@@ -529,6 +529,11 @@ async fn handle_trophy_delete(
             //    shared with the old direct path.
             let affected = delete::delete_trophy(&data.db, trophy.id).await?;
 
+            // Deleted medal drops out of its category's catalog panel.
+            if let Some(category) = &trophy.category {
+                data.medals_panel_signal.notify(guild_id.get() as i64, category.clone());
+            }
+
             // 2. Rewrite the confirmation with the success embed. The delete
             //    is committed, so a failed edit must NOT abort the flow:
             //    image cleanup and reward recompute below run regardless.
@@ -1073,6 +1078,8 @@ mod tests {
             dedication_text: Set(None),
             details: Set("d".into()),
             signed: Set(false),
+            category: Set(None),
+            active: Set(true),
             created_at: Set(now()),
             updated_at: Set(now()),
         }

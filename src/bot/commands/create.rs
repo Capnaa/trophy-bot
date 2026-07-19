@@ -32,6 +32,7 @@ const MAX_DESCRIPTION_CHARS: usize = 512;
 const MAX_EMOJI_CHARS: usize = 64;
 const MAX_DEDICATION_CHARS: usize = 32;
 const MAX_DETAILS_CHARS: usize = 300;
+const MAX_CATEGORY_CHARS: usize = 64;
 const MAX_VALUE: i32 = 999_999;
 
 // Stored defaults (schema.md; language-independent, kept from legacy).
@@ -130,6 +131,22 @@ pub(crate) fn validate_fields(
     Ok(())
 }
 
+/// Validates the optional `category` label. Kept separate from
+/// `validate_fields` (rather than adding a parameter) so that function's
+/// existing signature and tests stay untouched.
+pub(crate) fn validate_category(category: Option<&str>) -> Result<(), CreateError> {
+    if category.is_some_and(|c| c.chars().count() > MAX_CATEGORY_CHARS) {
+        return Err(CreateError::FieldTooLong { field: "category", max: MAX_CATEGORY_CHARS });
+    }
+    Ok(())
+}
+
+/// Normalizes a raw `category` option: blank/whitespace-only becomes
+/// "uncategorized" (`None`), otherwise the value is kept verbatim.
+pub(crate) fn normalize_category(category: Option<String>) -> Option<String> {
+    category.filter(|c| !c.trim().is_empty())
+}
+
 /// Parsed dedication: a mention/raw snowflake becomes a user dedication,
 /// anything else is plain text (spec: the legacy member prefix-search branch
 /// was dead in this flow and is intentionally not reimplemented).
@@ -177,6 +194,8 @@ pub(crate) struct NewTrophy {
     pub dedication_text: Option<String>,
     pub details: String,
     pub signed: bool,
+    pub category: Option<String>,
+    pub active: bool,
 }
 
 /// DB prechecks that must pass before the image download / insert: guild
@@ -244,6 +263,8 @@ pub(crate) async fn insert_trophy(
         dedication_text: Set(new.dedication_text),
         details: Set(new.details),
         signed: Set(new.signed),
+        category: Set(new.category),
+        active: Set(new.active),
         created_at: Set(now),
         updated_at: Set(now),
     }
@@ -344,10 +365,15 @@ pub async fn create(
     image: Option<serenity::Attachment>,
     #[description = "Private details for the trophy, you can set why do you give the trophy here."]
     details: Option<String>,
+    #[description = "Group this medal under a category, e.g. Government, Recurring, Limited Time"]
+    category: Option<String>,
+    #[description = "Whether this medal can currently be awarded. Defaults to true"]
+    active: Option<bool>,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
     let guild_id = util::require_guild_id(&ctx)?.get() as i64;
     let value = value.unwrap_or(DEFAULT_VALUE);
+    let category = normalize_category(category);
 
     // F3: every validation happens before any download or DB write.
     if let Err(err) = validate_fields(
@@ -358,6 +384,9 @@ pub async fn create(
         dedication.as_deref(),
         details.as_deref(),
     ) {
+        return util::reply_error(ctx, err.message(&locale), true).await;
+    }
+    if let Err(err) = validate_category(category.as_deref()) {
         return util::reply_error(ctx, err.message(&locale), true).await;
     }
 
@@ -427,6 +456,8 @@ pub async fn create(
         dedication_text,
         details: details.unwrap_or_else(|| DEFAULT_DETAILS.to_string()),
         signed: signed.unwrap_or(false),
+        category,
+        active: active.unwrap_or(true),
     };
 
     let trophy = match insert_trophy(db, new).await {
@@ -445,6 +476,12 @@ pub async fn create(
             return Err(err);
         }
     };
+
+    if trophy.active
+        && let Some(category) = &trophy.category
+    {
+        ctx.data().medals_panel_signal.notify(guild_id, category.clone());
+    }
 
     // Success embed: emoji/name title, description, value, optional signature
     // and dedication fields; footer shows the name (ADR 0004: IDs are never
@@ -472,6 +509,9 @@ pub async fn create(
             format!("<@{creator}>"),
             true,
         );
+    }
+    if let Some(category) = &trophy.category {
+        embed = embed.field(i18n::t(&locale, "create-field-category"), category.clone(), true);
     }
     let dedication_display = match (trophy.dedication_user_id, &trophy.dedication_text) {
         (Some(id), _) => Some(format!("<@{id}>")),
@@ -727,6 +767,8 @@ mod tests {
             "create-value",
             "create-field-signed",
             "create-field-dedicated",
+            "create-field-category",
+            "create-error-category-too-long",
             "create-footer",
         ] {
             assert_ne!(i18n::t_args(&locale, key, args), key, "missing ftl message: {key}");
@@ -742,6 +784,34 @@ mod tests {
         assert!(message.contains("512"), "got: {message}");
         let message = CreateError::DuplicateName { name: "Gold".into() }.message(&locale);
         assert!(message.contains("Gold"), "got: {message}");
+    }
+
+    // --- validate_category / normalize_category ---
+
+    #[test]
+    fn category_within_the_limit_passes() {
+        assert_eq!(validate_category(None), Ok(()));
+        assert_eq!(validate_category(Some("Government")), Ok(()));
+        assert_eq!(validate_category(Some(&"x".repeat(64))), Ok(()));
+    }
+
+    #[test]
+    fn category_over_the_limit_is_rejected() {
+        assert_eq!(
+            validate_category(Some(&"x".repeat(65))),
+            Err(CreateError::FieldTooLong { field: "category", max: 64 })
+        );
+    }
+
+    #[test]
+    fn blank_category_normalizes_to_none() {
+        assert_eq!(normalize_category(None), None);
+        assert_eq!(normalize_category(Some(String::new())), None);
+        assert_eq!(normalize_category(Some("   ".to_string())), None);
+        assert_eq!(
+            normalize_category(Some("Government".to_string())),
+            Some("Government".to_string())
+        );
     }
 
     // --- DB integration ---
@@ -760,6 +830,8 @@ mod tests {
             dedication_text: None,
             details: DEFAULT_DETAILS.to_string(),
             signed: false,
+            category: None,
+            active: true,
         }
     }
 
@@ -773,6 +845,8 @@ mod tests {
             dedication_user_id: Some(42),
             dedication_text: Some("ana".into()),
             signed: true,
+            category: Some("Government".into()),
+            active: false,
             ..new_trophy(1, "Gold Medal")
         };
         let id = new.id;
@@ -789,6 +863,8 @@ mod tests {
         assert_eq!(model.dedication_user_id, Some(42));
         assert_eq!(model.dedication_text.as_deref(), Some("ana"));
         assert!(model.signed);
+        assert_eq!(model.category.as_deref(), Some("Government"));
+        assert!(!model.active);
 
         // The guild row was auto-created (FK satisfied), not safe by default.
         let guild = guilds::Entity::find_by_id(1i64).one(&db).await.unwrap().unwrap();

@@ -25,6 +25,10 @@ pub struct Model {
     pub dedication_text: Option<String>,
     pub details: String,
     pub signed: bool,
+    /// Free-text grouping label; NULL = uncategorized (not on any panel).
+    pub category: Option<String>,
+    /// Inactive medals are excluded from `/award` but stay visible everywhere else.
+    pub active: bool,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }

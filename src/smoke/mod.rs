@@ -289,6 +289,8 @@ async fn step_create(
         dedication_text: None,
         details: "Disposable smoke-test trophy.".to_string(),
         signed: false,
+        category: None,
+        active: true,
     };
     let trophy = match create::insert_trophy(db, new).await {
         Ok(Ok(model)) => model,

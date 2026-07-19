@@ -92,6 +92,16 @@ Source of truth: `commands/manage/export.js`, `panel.js`, `perms.js`, `rewards.j
 
 **Rust target:** Keep one panel per guild via the `leaderboard_panels` table (unique guild_id). On create: delete/replace the old panel message; on delete: attempt to delete the message. Update panels on score change (award/revoke/clear) plus a periodic reconciliation task. Compute the leaderboard on the fly with a SQL aggregate (scores are always computed, never stored).
 
+### /panel medals create|delete — new capability, no legacy equivalent
+
+**Purpose:** Auto-updating catalog panel listing every currently-ACTIVE trophy in one `category`, so a guild's medal roster (previously tracked by hand) stays live instead of drifting out of sync.
+
+**Definition:**
+- Subcommands: `medals create <category>`, `medals delete <category>` — `category` autocompletes against the guild's distinct `trophies.category` values.
+- Discord default permission: Manage Guild (same as `/panel create/delete`).
+
+**Behavior:** unlike the leaderboard panel, a guild may have **any number** of these — one per category, enforced by `active_medals_panels`' `UNIQUE(guild_id, category)` index (separate table from `leaderboard_panels` on purpose: different cardinality, different refresh trigger). `create` follows the same F30/F31-style send-first-then-record/replace semantics as `/panel create`. Content: every trophy where `category` matches and `active = true`, alphabetical by name, `**{emoji} {name}** — {description}`; empty category renders a placeholder. Refreshed (debounced, same shape as the leaderboard panel's F29) whenever `/create`, `/edit` or the `/delete` confirmation touches a trophy's category, active flag, name, emoji or description — never on award/revoke/clear, since this panel carries no score data. A low-frequency reconciliation sweep (`src/bot/medals_panel.rs`) cleans up panels whose message was deleted out-of-band (F32-style).
+
 ---
 
 ## /permissions (perms.js) — DEPRECATED

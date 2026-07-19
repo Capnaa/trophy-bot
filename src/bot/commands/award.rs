@@ -71,7 +71,7 @@ pub(crate) async fn insert_awards<C: TransactionTrait + ConnectionTrait>(
 pub async fn award(
     ctx: Context<'_>,
     #[description = "Name of the trophy to award"]
-    #[autocomplete = "resolver::autocomplete_trophy"]
+    #[autocomplete = "resolver::autocomplete_active_trophy"]
     trophy: String,
     #[description = "User to award the trophy to"] user: serenity::User,
     #[description = "Number of trophies to award, defaults to 1"]
@@ -109,6 +109,12 @@ pub async fn award(
     else {
         return Ok(());
     };
+
+    // Autocomplete already hides inactive medals, but the exact name can
+    // still be typed directly — reject it here too (medal.active gate).
+    if !model.active {
+        return util::reply_error(ctx, i18n::t(&locale, "award-error-inactive"), true).await;
+    }
 
     insert_awards(
         db,
@@ -198,6 +204,8 @@ mod tests {
             dedication_text: Set(None),
             details: Set("d".into()),
             signed: Set(false),
+            category: Set(None),
+            active: Set(true),
             created_at: Set(now()),
             updated_at: Set(now()),
         }
@@ -306,5 +314,49 @@ mod tests {
         let not_found =
             i18n::t_args(&locale, "award-error-not-found", &[("input", "Nope".into())]);
         assert!(not_found.contains("Nope"), "{not_found}");
+
+        assert_ne!(i18n::t(&locale, "award-error-inactive"), "award-error-inactive");
+    }
+
+    // --- active gate ---
+
+    /// Regression guard: the active-medal check must run AFTER the trophy is
+    /// resolved but BEFORE any award row is inserted — autocomplete alone
+    /// only hides inactive medals from suggestions, it does not stop a
+    /// directly-typed exact name.
+    #[test]
+    fn handler_rejects_inactive_trophies_before_inserting_awards() {
+        let src = include_str!("award.rs");
+        let handler = src.split("pub async fn award").nth(1).expect("handler exists");
+        let resolve = handler.find("resolve_trophy_or_reply(").expect("handler resolves the trophy");
+        let gate = handler.find("model.active").expect("handler checks the active gate");
+        let insert = handler.find("insert_awards(").expect("handler inserts awards");
+        assert!(resolve < gate, "active gate must run after the trophy is resolved");
+        assert!(gate < insert, "active gate must run before any award row is inserted");
+    }
+
+    #[tokio::test]
+    async fn active_gate_only_excludes_inactive_trophies_from_the_query() {
+        let db = fresh_db().await;
+        insert_guild(&db, 1).await;
+        let active = insert_trophy(&db, 1, 10).await;
+        let inactive = insert_trophy(&db, 1, 10).await;
+        trophies::Entity::update_many()
+            .col_expr(trophies::Column::Active, sea_orm::sea_query::Expr::value(false))
+            .filter(trophies::Column::Id.eq(inactive))
+            .exec(&db)
+            .await
+            .unwrap();
+
+        let ids: Vec<Uuid> = trophies::Entity::find()
+            .filter(trophies::Column::GuildId.eq(1))
+            .filter(trophies::Column::Active.eq(true))
+            .all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, vec![active], "the same query autocomplete_active_trophy uses");
     }
 }

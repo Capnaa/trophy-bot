@@ -6,6 +6,7 @@
 //! there are deliberately no `Entity as CamelCase` re-export aliases so
 //! only one import style exists.
 
+pub mod active_medals_panels;
 pub mod bot_stats;
 pub mod guild_settings;
 pub mod guilds;
@@ -23,6 +24,7 @@ mod tests {
     #[test]
     fn entity_table_names_match_schema() {
         use super::*;
+        assert_eq!(active_medals_panels::Entity.table_name(), "active_medals_panels");
         assert_eq!(bot_stats::Entity.table_name(), "bot_stats");
         assert_eq!(guild_settings::Entity.table_name(), "guild_settings");
         assert_eq!(guilds::Entity.table_name(), "guilds");

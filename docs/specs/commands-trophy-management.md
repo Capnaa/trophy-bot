@@ -111,6 +111,7 @@ Discord default permission: Manage Guild (`"32"`, create.js:8). Legacy marker: `
 
 - Keep: field limits (32/128/64/32/300, ±999999), image constraints (png/jpg/jpeg/gif, 1 MB), dedication parsing as-is (mention/ID → user dedication, anything else → text dedication; there is no member prefix-search in the dedication flow to drop — that branch is dead here, see parseUser).
 - Change: validate **everything (including image) before** any DB write, inside one transaction. Trophy PK is UUIDv7, never shown to users; **name becomes UNIQUE per guild** — reject duplicates at create (migration renames legacy dupes to `"name legacyId"`). Value becomes an integer column. Drop the 150 cap (or raise via config). Store the image filename string as-is; keep files on disk. Store dedication as nullable `dedication_user_id` + nullable `dedication_text`.
+- New capability (no legacy equivalent): optional `category` (free text, ≤64 chars, blank clears/omits) groups the trophy on a `/panel medals` catalog panel; `active` (bool, default true) controls whether `/award` can give it out — see schema.md's `trophies.category`/`trophies.active` and `/award`'s Rust target below.
 
 ---
 
@@ -165,6 +166,7 @@ Same text limits as create. Image: extension prefix ∈ {png,jpg,jpeg,gif}; the 
 
 - Keep: `"-"` sentinel to clear dedication (or replace with an explicit boolean option); change-diff in the success reply; name/emoji/desc/details limits.
 - Change: allow editing `value` (the omission looks accidental, decide product-side); enforce image size and type properly using attachment metadata; always store the **local filename** consistently; validate before writing; renaming must respect the per-guild unique name constraint. Trophy resolved by name (unique), not numeric ID.
+- New capability: optional `category` (blank input clears it, matching create's semantics) and `active` are editable, same F37 change-report treatment as every other field; editing either signals a refresh of the affected `/panel medals` catalog panel(s) (both the old and new category when category itself changes).
 
 ---
 
@@ -265,6 +267,7 @@ Discord default permission: Manage Guild (award.js:8). Legacy marker `manage_use
 
 - Keep: 1–50 count limit (decide: reject vs coerce — recommend reject with clear error), bulk award as N rows.
 - Change: insert N rows into `user_trophies` (one row per award, duplicates allowed) in a transaction, recording `awarded_by` and `created_at`; score is never stored — always `SUM(trophies.value)` via JOIN; recompute role rewards after commit (working implementation, correct Serenity permission checks); resolve trophy by unique name (autocomplete recommended); no NaN class of bugs possible with typed columns.
+- New capability: `trophy.active = false` medals are excluded from `/award`'s autocomplete AND rejected if the exact name is typed directly (`award-error-inactive`) — every other command (`/revoke`, `/edit`, `/delete`, `/details`, `/show`, `/trophies`) is unaffected, so inactive medals stay fully manageable and visible to whoever already holds them.
 
 ---
 

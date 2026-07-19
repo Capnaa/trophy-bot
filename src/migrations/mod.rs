@@ -4,6 +4,7 @@ use sea_orm_migration::prelude::*;
 use crate::cli::Cli;
 
 mod m20260708_000001_initial_schema;
+mod m20260719_000002_medal_categories;
 
 
 pub struct Migrator;
@@ -12,7 +13,8 @@ pub struct Migrator;
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         vec![
-            Box::new(m20260708_000001_initial_schema::Migration)
+            Box::new(m20260708_000001_initial_schema::Migration),
+            Box::new(m20260719_000002_medal_categories::Migration)
         ]
     }
 }
@@ -168,6 +170,8 @@ mod tests {
             dedication_text: Set(Some("For you".to_string())),
             details: Set("No details provided.".to_string()),
             signed: Set(false),
+            category: Set(None),
+            active: Set(true),
             created_at: Set(now()),
             updated_at: Set(now()),
         }
@@ -309,6 +313,70 @@ mod tests {
             .expect("stat exists");
         assert_eq!(found.name, "award");
         assert_eq!(found.total, 41_240);
+    }
+
+    #[tokio::test]
+    async fn trophy_category_and_active_columns_round_trip() {
+        let db = fresh_db().await;
+        let guild = insert_guild(&db, 1).await;
+
+        let categorized = trophy_active_model(guild.id, "Gold", "gold").insert(&db).await.unwrap();
+        assert_eq!(categorized.category, None, "uncategorized by default in this helper");
+        assert!(categorized.active, "active by default in this helper");
+
+        let mut inactive = trophy_active_model(guild.id, "Silver", "silver");
+        inactive.category = Set(Some("Government".to_string()));
+        inactive.active = Set(false);
+        let inactive = inactive.insert(&db).await.unwrap();
+        assert_eq!(inactive.category.as_deref(), Some("Government"));
+        assert!(!inactive.active);
+    }
+
+    #[tokio::test]
+    async fn active_medals_panels_table_enforces_one_panel_per_guild_category() {
+        let db = fresh_db().await;
+        let guild = insert_guild(&db, 1).await;
+
+        crate::entities::active_medals_panels::ActiveModel {
+            id: Set(Uuid::now_v7()),
+            guild_id: Set(guild.id),
+            category: Set("Government".to_string()),
+            channel_id: Set(100),
+            message_id: Set(200),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(&db)
+        .await
+        .expect("first panel for the category");
+
+        // Same guild, same category: violates the unique index.
+        let duplicate = crate::entities::active_medals_panels::ActiveModel {
+            id: Set(Uuid::now_v7()),
+            guild_id: Set(guild.id),
+            category: Set("Government".to_string()),
+            channel_id: Set(111),
+            message_id: Set(222),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(&db)
+        .await;
+        assert!(duplicate.is_err(), "duplicate (guild_id, category) must be rejected");
+
+        // Same guild, different category: allowed (multiple panels per guild).
+        crate::entities::active_medals_panels::ActiveModel {
+            id: Set(Uuid::now_v7()),
+            guild_id: Set(guild.id),
+            category: Set("Recurring".to_string()),
+            channel_id: Set(333),
+            message_id: Set(444),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(&db)
+        .await
+        .expect("different category in the same guild is allowed");
     }
 
     #[tokio::test]
@@ -721,6 +789,6 @@ mod tests {
         let applied = Migrator::get_applied_migrations(&db)
             .await
             .expect("read applied migrations");
-        assert_eq!(applied.len(), 1);
+        assert_eq!(applied.len(), 2);
     }
 }

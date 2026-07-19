@@ -883,6 +883,8 @@ mod tests {
                 dedication_text: Set(None),
                 details: Set("No details provided.".to_string()),
                 signed: Set(false),
+                category: Set(None),
+                active: Set(true),
                 created_at: Set(now()),
                 updated_at: Set(now()),
             }

@@ -99,6 +99,8 @@ pub struct TrophyExport {
     pub dedication_text: Option<String>,
     pub details: String,
     pub signed: bool,
+    pub category: Option<String>,
+    pub active: bool,
     /// UTC.
     pub created_at: NaiveDateTime,
 }
@@ -118,6 +120,8 @@ impl From<trophies::Model> for TrophyExport {
             dedication_text: t.dedication_text,
             details: t.details,
             signed: t.signed,
+            category: t.category,
+            active: t.active,
             created_at: t.created_at,
         }
     }
@@ -264,6 +268,8 @@ mod tests {
             dedication_text: Set(Some("for Ana".to_string())),
             details: Set("Private details".to_string()),
             signed: Set(true),
+            category: Set(Some("Government".to_string())),
+            active: Set(true),
             created_at: Set(ts(1_600_000_000)),
             updated_at: Set(ts(1_600_000_000)),
         }

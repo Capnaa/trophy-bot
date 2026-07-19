@@ -1,6 +1,7 @@
 pub mod buttons;
 pub mod commands;
 pub mod images;
+pub mod medals_panel;
 pub mod panel_updater;
 pub mod render;
 pub mod resolver;
@@ -24,6 +25,9 @@ pub struct Data {
     /// F29: handle used by score-changing commands (award/revoke/clear) to
     /// request a debounced refresh of the guild's leaderboard panel.
     pub panel_signal: panel_updater::PanelSignal,
+    /// Handle used by trophy-editing commands (create/edit/delete) to
+    /// request a debounced refresh of a category's medals catalog panel.
+    pub medals_panel_signal: medals_panel::PanelSignal,
 }
 
 /// Unified command error type. Commands bubble errors up with `?`; the
@@ -42,6 +46,11 @@ pub struct Bot {
     panel_task: tokio::task::JoinHandle<()>,
     /// Flipped to `true` by `run` to stop the panel updater gracefully.
     panel_shutdown: tokio::sync::watch::Sender<bool>,
+    /// Background medals-catalog-panel updater, joined on shutdown per
+    /// ADR 0009 (same lifecycle as `panel_task`).
+    medals_panel_task: tokio::task::JoinHandle<()>,
+    /// Flipped to `true` by `run` to stop the medals panel updater gracefully.
+    medals_panel_shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl Bot {
@@ -55,21 +64,33 @@ impl Bot {
 
         let (panel_signal, panel_signals) = panel_updater::signal_channel();
         let (panel_shutdown, panel_shutdown_rx) = tokio::sync::watch::channel(false);
+        let (medals_panel_signal, medals_panel_signals) = medals_panel::signal_channel();
+        let (medals_panel_shutdown, medals_panel_shutdown_rx) = tokio::sync::watch::channel(false);
 
         let client = ClientBuilder::from(args)
             .application_id(id)
-            .framework(Self::framework(test_guild_id, db.clone(), panel_signal))
+            .framework(Self::framework(
+                test_guild_id,
+                db.clone(),
+                panel_signal,
+                medals_panel_signal,
+            ))
             .await?;
 
-        // Background panel updater (ADR 0009: stopped + joined by `run`).
+        // Background panel updaters (ADR 0009: stopped + joined by `run`).
+        let cache_http =
+            panel_updater::CacheAndHttp { cache: client.cache.clone(), http: client.http.clone() };
         let panel_task = tokio::task::spawn(panel_updater::run(
-            db,
-            panel_updater::CacheAndHttp {
-                cache: client.cache.clone(),
-                http: client.http.clone(),
-            },
+            db.clone(),
+            cache_http.clone(),
             panel_signals,
             panel_shutdown_rx,
+        ));
+        let medals_panel_task = tokio::task::spawn(medals_panel::run(
+            db,
+            cache_http,
+            medals_panel_signals,
+            medals_panel_shutdown_rx,
         ));
 
         log::debug!("Bot {} initialized", id);
@@ -81,6 +102,8 @@ impl Bot {
             test_guild_id,
             panel_task,
             panel_shutdown,
+            medals_panel_task,
+            medals_panel_shutdown,
         })
     }
 
@@ -89,6 +112,7 @@ impl Bot {
         test_guild_id: Option<GuildId>,
         db: DatabaseConnection,
         panel_signal: panel_updater::PanelSignal,
+        medals_panel_signal: medals_panel::PanelSignal,
     ) -> impl Framework {
         poise::Framework::builder()
             .options(poise::FrameworkOptions {
@@ -115,7 +139,7 @@ impl Bot {
                         Command::set_global_commands(&ctx.http, builders).await?;
                         log::info!("Sync commands globally");
                     }
-                    Ok(Data { db, panel_signal })
+                    Ok(Data { db, panel_signal, medals_panel_signal })
                 })
             })
             .build()
@@ -131,6 +155,8 @@ impl Bot {
             test_guild_id,
             panel_task,
             panel_shutdown,
+            medals_panel_task,
+            medals_panel_shutdown,
         } = self;
 
         // One-shot diagnostic: list what Discord actually registered. The
@@ -180,9 +206,13 @@ impl Bot {
         // runner dying early — otherwise the panel updater would keep
         // sweeping a dead bot forever).
         let _ = panel_shutdown.send(true);
+        let _ = medals_panel_shutdown.send(true);
         shard_manager.shutdown_all().await;
         if let Err(join_error) = panel_task.await {
             log::error!("Panel updater task failed to join: {join_error}");
+        }
+        if let Err(join_error) = medals_panel_task.await {
+            log::error!("Medals panel updater task failed to join: {join_error}");
         }
         let runner_result = match early_exit {
             Some(result) => result,

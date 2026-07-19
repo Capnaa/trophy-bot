@@ -701,6 +701,8 @@ async fn insert_trophies<C: ConnectionTrait>(
             dedication_text: Set(t.dedication_text.clone()),
             details: Set(t.details.clone()),
             signed: Set(t.signed),
+            category: Set(None),
+            active: Set(true),
             created_at: Set(t.created_at),
             updated_at: Set(now),
         })
