@@ -25,13 +25,14 @@
 
 use poise::serenity_prelude as serenity;
 use sea_orm::{
-    ColumnTrait, EntityTrait, QueryFilter, QuerySelect, TransactionSession, TransactionTrait,
+    ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, TransactionSession,
+    TransactionTrait,
 };
 use uuid::Uuid;
 
 use crate::bot::commands::delete;
 use crate::bot::{images, reward_apply, util, Data, Error};
-use crate::entities::{guilds, trophies};
+use crate::entities::{guilds, trophies, user_trophies};
 use crate::i18n;
 
 /// How long the /forgetme and /delete confirmation buttons stay valid.
@@ -114,6 +115,20 @@ pub(crate) fn press_outcome(
 // /delete confirmation flow (spec Rust target: "Add a confirmation button
 // for destructive delete"; delta documented in rust-parity-plan.md §4)
 // ---------------------------------------------------------------------------
+
+/// Custom-id namespace for /show holders buttons.
+const SHOW_HOLDERS_PREFIX: &str = "trophy-show-holders";
+
+/// Builds the custom id for a /show holders button: `trophy-show-holders:{trophy_uuid}`.
+pub(crate) fn show_holders_custom_id(trophy_id: Uuid) -> String {
+    format!("{SHOW_HOLDERS_PREFIX}:{trophy_id}")
+}
+
+/// Parses a component custom id back into the trophy id for the /show holders button.
+pub(crate) fn parse_show_holders_custom_id(id: &str) -> Option<Uuid> {
+    let rest = id.strip_prefix(SHOW_HOLDERS_PREFIX)?.strip_prefix(':')?;
+    Uuid::parse_str(rest).ok()
+}
 
 /// Custom-id namespace for /delete confirmation buttons.
 const DELETE_PREFIX: &str = "trophy-delete";
@@ -240,6 +255,8 @@ pub async fn handle_event(
 
     let result = if let Some((button, issued_at)) = parse_custom_id(&component.data.custom_id) {
         ("forgetme", handle_forgetme(ctx, component, data, button, issued_at).await)
+    } else if let Some(trophy_id) = parse_show_holders_custom_id(&component.data.custom_id) {
+        ("show-holders", handle_show_holders(ctx, component, data, trophy_id).await)
     } else if let Some((button, issued_at, invoker_id, trophy_id)) =
         parse_delete_custom_id(&component.data.custom_id)
     {
@@ -270,6 +287,67 @@ pub async fn handle_event(
             );
         }
     }
+    Ok(())
+}
+
+async fn handle_show_holders(
+    ctx: &serenity::Context,
+    component: &serenity::ComponentInteraction,
+    data: &Data,
+    trophy_id: Uuid,
+) -> anyhow::Result<()> {
+    let locale = i18n::resolve(Some(&component.locale));
+    let Some(guild_id) = component.guild_id else {
+        return Ok(());
+    };
+
+    component
+        .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
+        .await?;
+
+    let trophy = trophies::Entity::find_by_id(trophy_id)
+        .filter(trophies::Column::GuildId.eq(guild_id.get() as i64))
+        .one(&data.db)
+        .await?;
+    let Some(trophy) = trophy else {
+        let embed = serenity::CreateEmbed::new()
+            .title(i18n::t(&locale, "show-holders-missing-title"))
+            .description(i18n::t(&locale, "show-holders-missing"))
+            .colour(util::COLOR_ERROR);
+        component
+            .edit_response(&ctx.http, replace_message(embed))
+            .await?;
+        return Ok(());
+    };
+
+    let holders = user_trophies::Entity::find()
+        .filter(user_trophies::Column::GuildId.eq(guild_id.get() as i64))
+        .filter(user_trophies::Column::TrophyId.eq(trophy_id))
+        .order_by_desc(user_trophies::Column::AwardedAt)
+        .all(&data.db)
+        .await?;
+
+    let lines = if holders.is_empty() {
+        vec![i18n::t(&locale, "show-holders-empty")]
+    } else {
+        holders
+            .into_iter()
+            .map(|row| {
+                let user = row.user_id.to_string();
+                let when = row.awarded_at.format("%Y-%m-%d %H:%M").to_string();
+                format!("<@{user}> — {when}")
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let description = lines.join("\n");
+    let embed = serenity::CreateEmbed::new()
+        .title(format!("{} {}", trophy.emoji, trophy.name))
+        .description(description)
+        .colour(util::COLOR_MAIN);
+    component
+        .edit_response(&ctx.http, replace_message(embed))
+        .await?;
     Ok(())
 }
 
@@ -556,6 +634,12 @@ mod tests {
     use super::*;
     use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
     use uuid::Uuid;
+
+    #[test]
+    fn show_holders_custom_id_round_trips() {
+        let trophy = Uuid::now_v7();
+        assert_eq!(parse_show_holders_custom_id(&show_holders_custom_id(trophy)), Some(trophy));
+    }
 
     use crate::domain::normalize::normalize_name;
     use crate::domain::test_support::{fresh_db, insert_guild, now};

@@ -17,7 +17,7 @@ use std::path::Path;
 
 use poise::serenity_prelude as serenity;
 
-use crate::bot::{Context, Error, images, resolver, util};
+use crate::bot::{buttons, Context, Error, images, resolver, util};
 use crate::domain::settings::{self, Setting};
 use crate::i18n;
 
@@ -218,6 +218,13 @@ pub async fn show(
             reply = reply.attachment(serenity::CreateAttachment::bytes(bytes, filename));
         }
     }
+
+    let components = vec![serenity::CreateActionRow::Buttons(vec![
+        serenity::CreateButton::new(buttons::show_holders_custom_id(model.id))
+            .style(serenity::ButtonStyle::Primary)
+            .label(i18n::t(&locale, "show-button-holders")),
+    ])];
+    reply = reply.components(components);
     ctx.send(reply.embed(embed)).await?;
     Ok(())
 }
