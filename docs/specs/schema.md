@@ -30,7 +30,7 @@ Conventions: all tables carry `created_at` / `updated_at` timestamps maintained 
 | dedication_text | varchar(32) | NULL | set for text-only dedications AND alongside user dedications (stored name) |
 | details | varchar(300) | NOT NULL default text | |
 | signed | bool | NOT NULL default false | |
-| category | varchar(64) | NULL | free-text grouping label; NULL = uncategorized (does not appear on any category panel) |
+| category | varchar(64) | NULL | free-text grouping label; NULL = uncategorized (does not appear on any single-category `/panel medals` panel, but IS shown in its own "Uncategorized" bucket on the `/panel overview` panel) |
 | active | bool | NOT NULL default true | inactive medals are excluded from `/award` (autocomplete + direct resolve) but stay visible everywhere else — `/show`, `/trophies`, existing holders |
 | created_at / updated_at | timestamp | NOT NULL | created_at = legacy `created` (ms) or synthetic |
 
@@ -115,7 +115,7 @@ Indexes: `UNIQUE(guild_id, category)` — one panel per category per guild (the 
 | source_guild_id | i64 | NULL | cross-guild link (guild_links): NULL = render `guild_id`'s own catalog (default); set = render this OTHER guild's instead |
 | created_at / updated_at | timestamp | NOT NULL | updated_at doubles as "last successful render" |
 
-Rendered content: every ACTIVE, CATEGORIZED trophy in the effective guild, one embed field per category (alphabetical, capped at Discord's 25-field limit), each listing that category's active medals the same way `active_medals_panels` does. Uncategorized trophies never appear here either — consistent with the single-category panel. Refreshed by the exact same trigger as `active_medals_panels` (any category/active/name/emoji/description change) and swept the same way (F32-style) — piggybacks on `medals_panel.rs`'s existing debounce/sweep rather than a separate signal channel.
+Rendered content: every ACTIVE trophy in the effective guild, one embed field per category (alphabetical, capped at Discord's 25-field limit) plus a trailing "Uncategorized" field for active trophies with no category — each field lists its medals the same way `active_medals_panels` does. Refreshed by the exact same trigger as `active_medals_panels` (any category/active/name/emoji/description change) and swept the same way (F32-style) — piggybacks on `medals_panel.rs`'s existing debounce/sweep rather than a separate signal channel.
 
 ## guild_links
 

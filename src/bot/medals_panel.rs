@@ -495,11 +495,11 @@ const MAX_OVERVIEW_FIELDS: usize = 25;
 /// Discord's hard cap on one embed field's value.
 const MAX_FIELD_VALUE_CHARS: usize = 1024;
 
-/// Builds the "all categories" catalog embed: every ACTIVE, CATEGORIZED
-/// trophy in the guild, one field per category (alphabetical), each field
-/// listing that category's medals the same way [`render_category_embed`]
-/// does. Uncategorized trophies never appear here either — consistent with
-/// the single-category panel. Empty → a localized placeholder.
+/// Builds the "all categories" catalog embed: every ACTIVE trophy in the
+/// guild, one field per category (alphabetical), each field listing that
+/// category's medals the same way [`render_category_embed`] does.
+/// Uncategorized trophies get their own bucket, sorted after every real
+/// category. Empty → a localized placeholder.
 pub async fn render_overview_embed(
     db: &DatabaseConnection,
     guild_id: i64,
@@ -507,9 +507,7 @@ pub async fn render_overview_embed(
 ) -> anyhow::Result<serenity::CreateEmbed> {
     let medals = trophies::Entity::find()
         .filter(trophies::Column::GuildId.eq(guild_id))
-        .filter(trophies::Column::Category.is_not_null())
         .filter(trophies::Column::Active.eq(true))
-        .order_by_asc(trophies::Column::Category)
         .order_by_asc(trophies::Column::Name)
         .all(db)
         .await?;
@@ -522,15 +520,23 @@ pub async fn render_overview_embed(
         return Ok(embed.description(i18n::t(locale, "medals-overview-empty")));
     }
 
-    // `medals` is already sorted by category then name, so same-category
-    // trophies are contiguous — one pass groups them without a HashMap.
-    let mut categories: Vec<(String, Vec<&trophies::Model>)> = Vec::new();
+    // Grouped in Rust (not via SQL ORDER BY on the nullable column) since
+    // NULL ordering isn't portable across SQLite/Postgres (ADR 0003).
+    // BTreeMap sorts categories alphabetically; each group keeps the
+    // by-name order the query already provided. Uncategorized is collected
+    // separately and appended last, after every real category.
+    let mut grouped: std::collections::BTreeMap<String, Vec<&trophies::Model>> =
+        std::collections::BTreeMap::new();
+    let mut uncategorized: Vec<&trophies::Model> = Vec::new();
     for medal in &medals {
-        let category = medal.category.clone().expect("filtered to categorized trophies");
-        match categories.last_mut() {
-            Some((name, group)) if *name == category => group.push(medal),
-            _ => categories.push((category, vec![medal])),
+        match &medal.category {
+            Some(category) => grouped.entry(category.clone()).or_default().push(medal),
+            None => uncategorized.push(medal),
         }
+    }
+    let mut categories: Vec<(String, Vec<&trophies::Model>)> = grouped.into_iter().collect();
+    if !uncategorized.is_empty() {
+        categories.push((i18n::t(locale, "medals-overview-uncategorized"), uncategorized));
     }
 
     let truncated = categories.len() > MAX_OVERVIEW_FIELDS;
@@ -1348,13 +1354,14 @@ mod tests {
     // --- render_overview_embed ---
 
     #[tokio::test]
-    async fn overview_groups_active_categorized_medals_by_category_alphabetically() {
+    async fn overview_groups_active_medals_by_category_alphabetically_with_uncategorized_last() {
         let db = fresh_db().await;
         insert_trophy(&db, 1, "Zebra Medal", Some("Recurring"), true).await;
         insert_trophy(&db, 1, "Bronze Medal", Some("Government"), true).await;
         insert_trophy(&db, 1, "Gold Medal", Some("Government"), true).await;
         insert_trophy(&db, 1, "Retired Medal", Some("Government"), false).await;
         insert_trophy(&db, 1, "Loose Medal", None, true).await;
+        insert_trophy(&db, 1, "Retired Loose Medal", None, false).await;
 
         let locale = i18n::resolve(None);
         let embed = render_overview_embed(&db, 1, &locale).await.expect("render");
@@ -1362,21 +1369,31 @@ mod tests {
         let fields = json["fields"].as_array().expect("fields present");
 
         let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["Government", "Recurring"], "categories sorted alphabetically");
+        assert_eq!(
+            names,
+            vec!["Government", "Recurring", "Uncategorized"],
+            "real categories sorted alphabetically, Uncategorized bucket last"
+        );
 
         let government = fields[0]["value"].as_str().unwrap();
         assert!(government.contains("Bronze Medal") && government.contains("Gold Medal"));
         assert!(!government.contains("Retired Medal"), "inactive medal excluded");
-        assert!(!government.contains("Loose Medal"), "uncategorized medal excluded from overview");
 
         let recurring = fields[1]["value"].as_str().unwrap();
         assert!(recurring.contains("Zebra Medal"));
+
+        let uncategorized = fields[2]["value"].as_str().unwrap();
+        assert!(uncategorized.contains("Loose Medal"), "active uncategorized medal gets its own bucket");
+        assert!(
+            !uncategorized.contains("Retired Loose Medal"),
+            "inactive medal excluded even when uncategorized"
+        );
     }
 
     #[tokio::test]
-    async fn overview_shows_a_placeholder_when_nothing_categorized_is_active() {
+    async fn overview_shows_a_placeholder_when_nothing_is_active() {
         let db = fresh_db().await;
-        insert_trophy(&db, 1, "Uncategorized", None, true).await;
+        insert_trophy(&db, 1, "Retired Loose", None, false).await;
         insert_trophy(&db, 1, "Retired", Some("Government"), false).await;
 
         let locale = i18n::resolve(None);
@@ -1384,6 +1401,20 @@ mod tests {
         let json = serde_json::to_value(&embed).expect("serialize");
         assert_eq!(json["description"].as_str().unwrap(), i18n::t(&locale, "medals-overview-empty"));
         assert!(json.get("fields").is_none() || json["fields"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn overview_shows_only_the_uncategorized_bucket_when_that_is_all_there_is() {
+        let db = fresh_db().await;
+        insert_trophy(&db, 1, "Loose Medal", None, true).await;
+
+        let locale = i18n::resolve(None);
+        let embed = render_overview_embed(&db, 1, &locale).await.expect("render");
+        let json = serde_json::to_value(&embed).expect("serialize");
+        let fields = json["fields"].as_array().expect("fields present");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0]["name"].as_str().unwrap(), "Uncategorized");
+        assert!(fields[0]["value"].as_str().unwrap().contains("Loose Medal"));
     }
 
     #[tokio::test]
@@ -1442,6 +1473,7 @@ mod tests {
         for key in [
             "medals-overview-title",
             "medals-overview-empty",
+            "medals-overview-uncategorized",
             "medals-overview-truncated",
             "medals-overview-more-categories",
         ] {

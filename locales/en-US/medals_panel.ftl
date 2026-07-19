@@ -6,6 +6,7 @@ medals-panel-empty = Nothing active in this category yet.
 
 # All-categories overview panel content (`/panel overview create|delete`).
 medals-overview-title = 🎖️ Active Medals
-medals-overview-empty = No active, categorized medals yet.
+medals-overview-empty = No active medals yet.
+medals-overview-uncategorized = Uncategorized
 medals-overview-truncated = …(list truncated)
 medals-overview-more-categories = Some categories aren't shown — this server has more than Discord allows in one panel.
