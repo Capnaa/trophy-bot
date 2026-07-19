@@ -10,6 +10,9 @@ pub struct Model {
     pub guild_id: i64,
     pub channel_id: i64,
     pub message_id: i64,
+    /// Cross-guild link: NULL = render `guild_id`'s own leaderboard
+    /// (default); set = render this OTHER guild's leaderboard instead.
+    pub source_guild_id: Option<i64>,
     pub created_at: DateTime,
     /// Doubles as "last successful render" for the F32 reconciliation sweep.
     pub updated_at: DateTime,

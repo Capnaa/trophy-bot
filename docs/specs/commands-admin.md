@@ -90,7 +90,7 @@ Source of truth: `commands/manage/export.js`, `panel.js`, `perms.js`, `rewards.j
 - CLAUDE.md: "Updates automatically when scores change" — FALSE; updates only via the background loop.
 - CLAUDE.md: "Only one panel per server allowed" — not validated/enforced, only overwritten.
 
-**Rust target:** Keep one panel per guild via the `leaderboard_panels` table (unique guild_id). On create: delete/replace the old panel message; on delete: attempt to delete the message. Update panels on score change (award/revoke/clear) plus a periodic reconciliation task. Compute the leaderboard on the fly with a SQL aggregate (scores are always computed, never stored).
+**Rust target:** Keep one panel per guild via the `leaderboard_panels` table (unique guild_id). On create: delete/replace the old panel message; on delete: attempt to delete the message. Update panels on score change (award/revoke/clear) plus a periodic reconciliation task. Compute the leaderboard on the fly with a SQL aggregate (scores are always computed, never stored). New capability: if this guild is linked (accepted, `guild_links`) to a source guild, `create` automatically renders — and every later refresh re-renders — the SOURCE guild's leaderboard instead of this guild's own, with no extra command option (see `/link` below).
 
 ### /panel medals create|delete — new capability, no legacy equivalent
 
@@ -101,6 +101,30 @@ Source of truth: `commands/manage/export.js`, `panel.js`, `perms.js`, `rewards.j
 - Discord default permission: Manage Guild (same as `/panel create/delete`).
 
 **Behavior:** unlike the leaderboard panel, a guild may have **any number** of these — one per category, enforced by `active_medals_panels`' `UNIQUE(guild_id, category)` index (separate table from `leaderboard_panels` on purpose: different cardinality, different refresh trigger). `create` follows the same F30/F31-style send-first-then-record/replace semantics as `/panel create`. Content: every trophy where `category` matches and `active = true`, alphabetical by name, `**{emoji} {name}** — {description}`; empty category renders a placeholder. Refreshed (debounced, same shape as the leaderboard panel's F29) whenever `/create`, `/edit` or the `/delete` confirmation touches a trophy's category, active flag, name, emoji or description — never on award/revoke/clear, since this panel carries no score data. A low-frequency reconciliation sweep (`src/bot/medals_panel.rs`) cleans up panels whose message was deleted out-of-band (F32-style).
+
+### /panel overview create|delete — new capability, no legacy equivalent
+
+**Purpose:** One auto-updating panel showing every ACTIVE, categorized trophy across the whole guild, sectioned by category — the "all `/panel medals` panels combined into one message" view, so admins don't have to create one panel per category to get a full roster.
+
+**Definition:**
+- Subcommands: `overview create`, `overview delete` (no options — one overview panel per guild).
+- Discord default permission: Manage Guild.
+
+**Behavior:** backed by its own `medals_overview_panels` table, one row per guild (PK on `guild_id`, same shape as `leaderboard_panels`) — deliberately NOT a special-cased row in `active_medals_panels`, since "all categories" doesn't fit that table's per-category unique key cleanly. Content: one embed field per category (alphabetical, name + `**{emoji} {name}** — {description}` lines exactly like the single-category panel), capped at Discord's 25-field limit with a footer note if a guild has more categories than that; uncategorized trophies are excluded, same as the single-category panels. Refresh is NOT a separate signal/debounce — it piggybacks on the exact same per-category signal `active_medals_panels` already reacts to (any category/active/name/emoji/description change fires both), and the same reconciliation sweep walks both tables. Cross-guild linked (`guild_links`) the same way as the other two panel types.
+
+---
+
+## /link — new capability, no legacy equivalent
+
+**Purpose:** Read-only, mutual-consent link between two guilds so one guild's `/panel` and `/panel medals` panels can mirror another's data instead of duplicating trophies across servers.
+
+**Definition:**
+- Subcommands: `request <guild_id>`, `accept <guild_id>`, `revoke [guild_id]`, `status` — `guild_id` is a typed Discord snowflake (no native "other guild" picker exists in Discord's slash command API); `accept`/`revoke`'s `guild_id` autocompletes against this guild's own pending/linked rows only (never a global guild listing — a server's use of the bot is never exposed to another).
+- Discord default permission: Manage Guild.
+
+**Roles:** the LINKED guild ("B") runs `request <A>`; an admin in the SOURCE guild ("A") runs `accept <B>`. Once accepted, B's panel commands automatically render A's data — no parameter needed on `/panel create`/`/panel medals create`, since `guild_links.UNIQUE(linked_guild_id)` means B can only ever mirror one source at a time. A can be the source for many guilds (one-to-many). Every mutating trophy command (`/create`, `/edit`, `/delete`, `/award`, `/revoke`, `/clear`) stays scoped to `ctx.guild_id()` exactly as before — this feature is panels-only, never write access.
+
+**Safety:** `revoke` (either side, unilateral) deletes the `guild_links` row and immediately tears down every panel B had pointed at A (message + record, both panel types). Independently, both panel updaters (`panel_updater.rs`, `medals_panel.rs`) re-validate the link against `guild_links` on **every** refresh before rendering cross-guild data — not just trusting a cached column — so a revoked link stops leaking data on the very next refresh even if the revoke-time cleanup ever missed a row (same "sweep is the safety net" philosophy as the existing F32 dead-panel cleanup).
 
 ---
 

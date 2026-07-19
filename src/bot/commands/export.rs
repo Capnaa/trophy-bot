@@ -424,6 +424,7 @@ mod tests {
             guild_id: Set(1),
             channel_id: Set(333),
             message_id: Set(444),
+            source_guild_id: Set(None),
             created_at: Set(now()),
             updated_at: Set(now()),
         }

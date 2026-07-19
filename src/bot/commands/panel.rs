@@ -29,6 +29,7 @@
 use poise::serenity_prelude as serenity;
 
 use crate::bot::{medals_panel, panel_updater, render, util, Context, Error};
+use crate::domain::guild_links;
 use crate::i18n;
 
 /// Create a leaderboard panel. You can only have one panel at a time.
@@ -37,7 +38,7 @@ use crate::i18n;
     guild_only,
     default_member_permissions = "MANAGE_GUILD",
     required_permissions = "MANAGE_GUILD",
-    subcommands("create", "delete", "medals"),
+    subcommands("create", "delete", "medals", "overview"),
     subcommand_required
 )]
 pub async fn panel(_ctx: Context<'_>) -> Result<(), Error> {
@@ -58,6 +59,19 @@ async fn medals(_ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Manage the all-categories medals overview panel.
+#[poise::command(
+    slash_command,
+    guild_only,
+    subcommands("overview_create", "overview_delete"),
+    subcommand_required,
+    rename = "overview"
+)]
+async fn overview(_ctx: Context<'_>) -> Result<(), Error> {
+    // Never reached: subcommand_required.
+    Ok(())
+}
+
 /// Create the panel for the leaderboard.
 #[poise::command(slash_command, guild_only)]
 async fn create(ctx: Context<'_>) -> Result<(), Error> {
@@ -69,15 +83,19 @@ async fn create(ctx: Context<'_>) -> Result<(), Error> {
     // lookups), so acknowledge early; the confirmation stays ephemeral.
     ctx.defer_ephemeral().await?;
 
+    // Cross-guild link (guild_links): if this guild mirrors another one,
+    // the panel renders (and later refreshes) THAT guild's leaderboard.
+    let source = guild_links::accepted_source_for(db, guild_id.get() as i64).await?;
+    let data_guild_id = source.map_or(guild_id, |id| serenity::GuildId::new(id as u64));
+
     let panel_locale = i18n::resolve(None);
-    let guild_name = ctx
-        .guild()
-        .map(|guild| guild.name.to_string())
-        .unwrap_or_else(|| i18n::t(&panel_locale, "leaderboard-guild-fallback"));
+    let guild_name =
+        panel_updater::guild_display_name(ctx.serenity_context(), data_guild_id, &panel_locale)
+            .await;
     let embed = render::render_leaderboard(
         db,
         ctx.serenity_context(),
-        guild_id,
+        data_guild_id,
         &guild_name,
         1,
         &panel_locale,
@@ -116,6 +134,7 @@ async fn create(ctx: Context<'_>) -> Result<(), Error> {
         guild_id.get() as i64,
         ctx.channel_id().get() as i64,
         message.id.get() as i64,
+        source,
     )
     .await?;
 
@@ -169,10 +188,14 @@ async fn medals_create(
     // large category — acknowledge early; the confirmation stays ephemeral.
     ctx.defer_ephemeral().await?;
 
+    // Cross-guild link: if this guild mirrors another one, the panel
+    // renders (and later refreshes) THAT guild's category catalog.
+    let source = guild_links::accepted_source_for(db, guild_id.get() as i64).await?;
+    let data_guild_id = source.unwrap_or(guild_id.get() as i64);
+
     let panel_locale = i18n::resolve(None);
     let embed =
-        medals_panel::render_category_embed(db, guild_id.get() as i64, &category, &panel_locale)
-            .await?;
+        medals_panel::render_category_embed(db, data_guild_id, &category, &panel_locale).await?;
 
     // F31-style: send first; the record exists only for a message that exists.
     let message = match ctx
@@ -204,6 +227,7 @@ async fn medals_create(
         &category,
         ctx.channel_id().get() as i64,
         message.id.get() as i64,
+        source,
     )
     .await?;
 
@@ -252,22 +276,112 @@ async fn medals_delete(
     util::reply_embed(ctx, embed, true).await
 }
 
+/// Create a catalog panel of every active medal, sectioned by category.
+#[poise::command(
+    slash_command,
+    guild_only,
+    default_member_permissions = "MANAGE_GUILD",
+    required_permissions = "MANAGE_GUILD",
+    rename = "create"
+)]
+async fn overview_create(ctx: Context<'_>) -> Result<(), Error> {
+    let locale = util::locale(&ctx);
+    let guild_id = util::require_guild_id(&ctx)?;
+    let db = &ctx.data().db;
+
+    // The first render queries the DB and can exceed the 3s window on a
+    // large catalog — acknowledge early; the confirmation stays ephemeral.
+    ctx.defer_ephemeral().await?;
+
+    // Cross-guild link: if this guild mirrors another one, the panel
+    // renders (and later refreshes) THAT guild's full catalog.
+    let source = guild_links::accepted_source_for(db, guild_id.get() as i64).await?;
+    let data_guild_id = source.unwrap_or(guild_id.get() as i64);
+
+    let panel_locale = i18n::resolve(None);
+    let embed = medals_panel::render_overview_embed(db, data_guild_id, &panel_locale).await?;
+
+    // F31-style: send first; the record exists only for a message that exists.
+    let message = match ctx
+        .channel_id()
+        .send_message(ctx.serenity_context(), serenity::CreateMessage::new().embed(embed))
+        .await
+    {
+        Ok(message) => message,
+        Err(error) => {
+            log::warn!(
+                "/panel overview create could not send the panel message (guild={}, channel={}): {error}",
+                guild_id.get(),
+                ctx.channel_id().get()
+            );
+            return util::reply_error(ctx, i18n::t(&locale, "panel-overview-create-failed"), true)
+                .await;
+        }
+    };
+
+    // F30-style replace semantics: drop the previous overview panel (best
+    // effort, logged inside), only after the replacement exists.
+    if let Some(old) = medals_panel::get_overview_panel(db, guild_id.get() as i64).await? {
+        medals_panel::delete_overview_panel_message(ctx.serenity_context(), &old).await;
+    }
+
+    medals_panel::save_overview_panel(
+        db,
+        guild_id.get() as i64,
+        ctx.channel_id().get() as i64,
+        message.id.get() as i64,
+        source,
+    )
+    .await?;
+
+    let embed = serenity::CreateEmbed::new()
+        .colour(util::COLOR_SUCCESS)
+        .description(i18n::t(&locale, "panel-overview-created"));
+    util::reply_embed(ctx, embed, true).await
+}
+
+/// Delete the all-categories medals overview panel.
+#[poise::command(
+    slash_command,
+    guild_only,
+    default_member_permissions = "MANAGE_GUILD",
+    required_permissions = "MANAGE_GUILD",
+    rename = "delete"
+)]
+async fn overview_delete(ctx: Context<'_>) -> Result<(), Error> {
+    let locale = util::locale(&ctx);
+    let guild_id = util::require_guild_id(&ctx)?;
+    let db = &ctx.data().db;
+
+    let Some(panel) = medals_panel::get_overview_panel(db, guild_id.get() as i64).await? else {
+        return util::reply_error(ctx, i18n::t(&locale, "panel-overview-delete-none"), true).await;
+    };
+
+    medals_panel::delete_overview_panel_message(ctx.serenity_context(), &panel).await;
+    medals_panel::remove_overview_panel(db, guild_id.get() as i64).await?;
+
+    let embed = serenity::CreateEmbed::new()
+        .colour(util::COLOR_SUCCESS)
+        .description(i18n::t(&locale, "panel-overview-deleted"));
+    util::reply_embed(ctx, embed, true).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn registers_create_delete_and_medals_subcommands_and_requires_one() {
+    fn registers_create_delete_medals_and_overview_subcommands_and_requires_one() {
         let command = panel();
         assert_eq!(command.name, "panel");
         assert!(command.subcommand_required);
-        for name in ["create", "delete", "medals"] {
+        for name in ["create", "delete", "medals", "overview"] {
             assert!(
                 command.subcommands.iter().any(|sub| sub.name == name),
                 "missing subcommand {name}"
             );
         }
-        assert_eq!(command.subcommands.len(), 3);
+        assert_eq!(command.subcommands.len(), 4);
     }
 
     #[test]
@@ -286,6 +400,24 @@ mod tests {
             );
         }
         assert_eq!(medals.subcommands.len(), 2);
+    }
+
+    #[test]
+    fn overview_group_registers_create_and_delete_and_requires_one() {
+        let command = panel();
+        let overview = command
+            .subcommands
+            .iter()
+            .find(|sub| sub.name == "overview")
+            .expect("overview subcommand group registered");
+        assert!(overview.subcommand_required);
+        for name in ["create", "delete"] {
+            assert!(
+                overview.subcommands.iter().any(|sub| sub.name == name),
+                "missing /panel overview {name}"
+            );
+        }
+        assert_eq!(overview.subcommands.len(), 2);
     }
 
     #[test]
@@ -330,5 +462,18 @@ mod tests {
             i18n::t(&locale, "panel-medals-create-failed"),
             "panel-medals-create-failed"
         );
+    }
+
+    #[test]
+    fn overview_catalog_keys_exist() {
+        let locale = i18n::resolve(None);
+        for key in [
+            "panel-overview-created",
+            "panel-overview-create-failed",
+            "panel-overview-deleted",
+            "panel-overview-delete-none",
+        ] {
+            assert_ne!(i18n::t(&locale, key), key, "missing catalog key {key}");
+        }
     }
 }

@@ -8,10 +8,10 @@ help-description =
     Create custom trophies, award them to members and climb the leaderboard!
 
     🏆 **Trophy management** (requires Manage Server)
-    • `/create` — create a new trophy for your server
+    • `/create` — create a new trophy
     • `/edit` — edit an existing trophy
     • `/delete` — delete a trophy
-    • `/award` — award a trophy to a member
+    • `/award` — award a trophy to a member (inactive trophies can't be given out)
     • `/revoke` — take an awarded trophy back
     • `/clear` — reset a member's trophies and score
     • `/details` — view a trophy's private details
@@ -25,6 +25,9 @@ help-description =
     • `/settings` — configure the bot for this server
     • `/rewards` — automatic role rewards based on score
     • `/panel` — auto-updating leaderboard panel
+    • `/panel medals` — auto-updating catalog panel for one category of active trophies
+    • `/panel overview` — auto-updating catalog panel for every category at once
+    • `/link` — mirror another server's panels here, or let another server mirror yours
     • `/export` — export your server's data
 
     Who can use each command is controlled by Discord itself: open **Server Settings → Integrations → Trophy Bot** to allow or deny commands per role, member or channel.
@@ -37,11 +40,7 @@ invite-description =
 
 support-title = ❓ You need support?
 support-description =
-    Here is how to get help:
-
-    • Join the [Support Server](https://discord.gg/kNmgU44xgU)
-    • Report bugs on [GitHub Issues](https://github.com/Aidanete/trophy-bot/issues)
-    • Have an idea? Use `/suggest`
+    Dm .capna on dc
 
 suggest-title = 🫂 Migrating Suggestions
 suggest-description =

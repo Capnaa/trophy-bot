@@ -772,6 +772,7 @@ async fn insert_panels<C: ConnectionTrait>(
                 guild_id: Set(g.id),
                 channel_id: Set(p.channel_id),
                 message_id: Set(p.message_id),
+                source_guild_id: Set(None),
                 created_at: Set(now),
                 updated_at: Set(now),
             })

@@ -5,6 +5,8 @@ use crate::cli::Cli;
 
 mod m20260708_000001_initial_schema;
 mod m20260719_000002_medal_categories;
+mod m20260719_000003_guild_links;
+mod m20260719_000004_medals_overview_panels;
 
 
 pub struct Migrator;
@@ -14,7 +16,9 @@ impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         vec![
             Box::new(m20260708_000001_initial_schema::Migration),
-            Box::new(m20260719_000002_medal_categories::Migration)
+            Box::new(m20260719_000002_medal_categories::Migration),
+            Box::new(m20260719_000003_guild_links::Migration),
+            Box::new(m20260719_000004_medals_overview_panels::Migration)
         ]
     }
 }
@@ -281,6 +285,7 @@ mod tests {
             guild_id: Set(guild.id),
             channel_id: Set(631_540_341_148_876_802),
             message_id: Set(985_219_082_662_064_178),
+            source_guild_id: Set(None),
             created_at: Set(now()),
             updated_at: Set(now()),
         }
@@ -343,6 +348,7 @@ mod tests {
             category: Set("Government".to_string()),
             channel_id: Set(100),
             message_id: Set(200),
+            source_guild_id: Set(None),
             created_at: Set(now()),
             updated_at: Set(now()),
         }
@@ -357,6 +363,7 @@ mod tests {
             category: Set("Government".to_string()),
             channel_id: Set(111),
             message_id: Set(222),
+            source_guild_id: Set(None),
             created_at: Set(now()),
             updated_at: Set(now()),
         }
@@ -371,12 +378,58 @@ mod tests {
             category: Set("Recurring".to_string()),
             channel_id: Set(333),
             message_id: Set(444),
+            source_guild_id: Set(None),
             created_at: Set(now()),
             updated_at: Set(now()),
         }
         .insert(&db)
         .await
         .expect("different category in the same guild is allowed");
+    }
+
+    #[tokio::test]
+    async fn medals_overview_panels_table_enforces_one_panel_per_guild() {
+        let db = fresh_db().await;
+        let guild = insert_guild(&db, 1).await;
+
+        crate::entities::medals_overview_panels::ActiveModel {
+            guild_id: Set(guild.id),
+            channel_id: Set(100),
+            message_id: Set(200),
+            source_guild_id: Set(None),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(&db)
+        .await
+        .expect("first overview panel for the guild");
+
+        // Same guild again: violates the PK.
+        let duplicate = crate::entities::medals_overview_panels::ActiveModel {
+            guild_id: Set(guild.id),
+            channel_id: Set(111),
+            message_id: Set(222),
+            source_guild_id: Set(None),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(&db)
+        .await;
+        assert!(duplicate.is_err(), "duplicate guild_id must be rejected (PK)");
+
+        // A different guild is unaffected.
+        let other = insert_guild(&db, 2).await;
+        crate::entities::medals_overview_panels::ActiveModel {
+            guild_id: Set(other.id),
+            channel_id: Set(333),
+            message_id: Set(444),
+            source_guild_id: Set(None),
+            created_at: Set(now()),
+            updated_at: Set(now()),
+        }
+        .insert(&db)
+        .await
+        .expect("a different guild's overview panel is allowed");
     }
 
     #[tokio::test]
@@ -596,6 +649,7 @@ mod tests {
             guild_id: Set(guild.id),
             channel_id: Set(1),
             message_id: Set(2),
+            source_guild_id: Set(None),
             created_at: Set(now()),
             updated_at: Set(now()),
         }
@@ -789,6 +843,6 @@ mod tests {
         let applied = Migrator::get_applied_migrations(&db)
             .await
             .expect("read applied migrations");
-        assert_eq!(applied.len(), 2);
+        assert_eq!(applied.len(), 4);
     }
 }

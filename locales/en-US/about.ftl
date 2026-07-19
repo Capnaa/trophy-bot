@@ -6,5 +6,4 @@ about-title = About Bardonian Medal Bot 🏆
 about-description =
     Bardonian Medal Bot for handling the Bardonian Medals
     by Capna! Version { $version }
-    https://github.com/Capnaa/trophy-bot
 

@@ -86,6 +86,7 @@ Indexes: `UNIQUE(guild_id, role_id)` (F22; importer dedupes the 7 legacy duplica
 | guild_id | i64 | PK, FK guilds ON DELETE CASCADE | one panel per guild, enforced by PK (F30) |
 | channel_id | i64 | NOT NULL | |
 | message_id | i64 | NOT NULL | |
+| source_guild_id | i64 | NULL | cross-guild link (guild_links): NULL = render `guild_id`'s own leaderboard (default); set = render this OTHER guild's leaderboard instead, while the message still physically lives in `guild_id` |
 | created_at / updated_at | timestamp | NOT NULL | updated_at doubles as "last successful render" for the F32 reconciliation sweep |
 
 461 rows at import; many stale (validated at first sweep, not at import).
@@ -99,9 +100,38 @@ Indexes: `UNIQUE(guild_id, role_id)` (F22; importer dedupes the 7 legacy duplica
 | category | varchar(64) | NOT NULL | the `trophies.category` this panel is scoped to |
 | channel_id | i64 | NOT NULL | |
 | message_id | i64 | NOT NULL | |
+| source_guild_id | i64 | NULL | cross-guild link (guild_links): NULL = render `guild_id`'s own category catalog (default); set = render this OTHER guild's category instead |
 | created_at / updated_at | timestamp | NOT NULL | updated_at doubles as "last successful render" (same convention as leaderboard_panels) |
 
-Indexes: `UNIQUE(guild_id, category)` — one panel per category per guild (the multi-row analogue of `leaderboard_panels`' single-row-per-guild PK). Rendered content: every `trophies` row in that guild+category with `active = true`, name + description, no score data — a live catalog, not a leaderboard. Refreshed on trophy create/edit/delete (category, active, name, emoji or description changed), never on award/revoke/clear.
+Indexes: `UNIQUE(guild_id, category)` — one panel per category per guild (the multi-row analogue of `leaderboard_panels`' single-row-per-guild PK). Rendered content: every `trophies` row in the EFFECTIVE guild (`source_guild_id` if set, else `guild_id`) + category with `active = true`, name + description, no score data — a live catalog, not a leaderboard. Refreshed on trophy create/edit/delete (category, active, name, emoji or description changed) in the effective guild, never on award/revoke/clear.
+
+## medals_overview_panels
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| guild_id | i64 | PK, FK guilds ON DELETE CASCADE | one overview panel per guild, enforced by PK (same convention as `leaderboard_panels`) |
+| channel_id | i64 | NOT NULL | |
+| message_id | i64 | NOT NULL | |
+| source_guild_id | i64 | NULL | cross-guild link (guild_links): NULL = render `guild_id`'s own catalog (default); set = render this OTHER guild's instead |
+| created_at / updated_at | timestamp | NOT NULL | updated_at doubles as "last successful render" |
+
+Rendered content: every ACTIVE, CATEGORIZED trophy in the effective guild, one embed field per category (alphabetical, capped at Discord's 25-field limit), each listing that category's active medals the same way `active_medals_panels` does. Uncategorized trophies never appear here either — consistent with the single-category panel. Refreshed by the exact same trigger as `active_medals_panels` (any category/active/name/emoji/description change) and swept the same way (F32-style) — piggybacks on `medals_panel.rs`'s existing debounce/sweep rather than a separate signal channel.
+
+## guild_links
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| id | UUID | PK | UUIDv7, app-generated |
+| source_guild_id | i64 | NOT NULL, FK guilds ON DELETE CASCADE | the data owner ("guild A") |
+| linked_guild_id | i64 | NOT NULL, FK guilds ON DELETE CASCADE | the panel host ("guild B") that mirrors `source_guild_id`'s panels |
+| requested_by | i64 | NOT NULL | user who ran `/link request` |
+| accepted_by | i64 | NULL | user who ran `/link accept`; NULL while pending |
+| accepted_at | timestamp | NULL | **NULL = pending, set = accepted** — doubles as the status flag, no separate enum column |
+| created_at / updated_at | timestamp | NOT NULL | |
+
+Indexes: `UNIQUE(linked_guild_id)` — a guild can be the *linked* side of at most one row (pending or accepted) at a time, so each B mirrors exactly one A; `(source_guild_id)` — non-unique, since one A can be linked into many guilds' panels (one-to-many). `source_guild_id != linked_guild_id` is enforced app-side (cross-column CHECK constraints aren't portable via the SeaORM schema API), the same class of app-level rule as `role_rewards`' 20-per-guild cap.
+
+Every panel render that has a `source_guild_id` set re-validates against this table (an `accepted_at IS NOT NULL` row must exist for that exact `(source_guild_id, linked_guild_id)` pair) BEFORE rendering — not just trusting the panel's stored column — so a revoked link stops leaking data on the very next refresh even if cleanup at revoke time were ever incomplete.
 
 ## bot_stats — key/value counters
 

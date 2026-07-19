@@ -1,7 +1,7 @@
 //! `/about` — static informational embed (spec: docs/specs/commands-utility.md).
 //!
-//! Links to GitHub, Ko-fi and the support server, credits the creator and
-//! shows the version pulled from `Cargo.toml` (per the spec's Rust target).
+//! Credits the creator and shows the version pulled from `Cargo.toml` (per
+//! the spec's Rust target). No external links — see `/support` for those.
 
 use poise::serenity_prelude as serenity;
 
@@ -41,10 +41,6 @@ mod tests {
         );
         assert!(
             description.contains(env!("CARGO_PKG_VERSION")),
-            "got: {description}"
-        );
-        assert!(
-            description.contains("github.com/Capnaa/trophy-bot"),
             "got: {description}"
         );
     }

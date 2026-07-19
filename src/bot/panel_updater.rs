@@ -181,6 +181,7 @@ pub(crate) async fn save_panel(
     guild_id: i64,
     channel_id: i64,
     message_id: i64,
+    source_guild_id: Option<i64>,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now().naive_utc();
     let txn = db.begin().await?;
@@ -199,6 +200,7 @@ pub(crate) async fn save_panel(
         guild_id: Set(guild_id),
         channel_id: Set(channel_id),
         message_id: Set(message_id),
+        source_guild_id: Set(source_guild_id),
         created_at: Set(now),
         updated_at: Set(now),
     })
@@ -207,6 +209,7 @@ pub(crate) async fn save_panel(
             .update_columns([
                 leaderboard_panels::Column::ChannelId,
                 leaderboard_panels::Column::MessageId,
+                leaderboard_panels::Column::SourceGuildId,
                 leaderboard_panels::Column::UpdatedAt,
             ])
             .to_owned(),
@@ -267,8 +270,6 @@ pub(crate) async fn touch_panel(db: &DatabaseConnection, guild_id: i64) -> anyho
 /// What a refresh attempt did to the panel record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PanelFate {
-    /// The guild has no panel record — nothing to do.
-    NoPanel,
     /// Message edited; `updated_at` bumped.
     Updated,
     /// The target channel/message is gone (404) — record removed (F32).
@@ -350,7 +351,8 @@ pub(crate) async fn settle_refresh(
 
 /// Guild display name for the panel title: cache first, one HTTP fetch as
 /// fallback, localized placeholder if both fail (never aborts a refresh).
-async fn guild_display_name(
+/// `pub(crate)`: also used by `/panel create` to name a linked source guild.
+pub(crate) async fn guild_display_name(
     cache_http: &impl serenity::CacheHttp,
     guild_id: serenity::GuildId,
     locale: &LanguageIdentifier,
@@ -407,12 +409,32 @@ pub(crate) async fn refresh_panel(
         // Ids that cannot be snowflakes can never resolve: dead by definition.
         return settle_refresh(db, panel, Err(EditFailure::DeadTarget)).await;
     };
-    let guild_id = serenity::GuildId::new(guild);
+    // Cross-guild link (guild_links): render the source guild's leaderboard
+    // instead of this panel's own, re-validating the link is still accepted
+    // on EVERY refresh — not just trusting the stored column — so a revoked
+    // link stops leaking data on the very next refresh regardless of
+    // whether `/link revoke`'s cleanup already caught this row.
+    let data_guild_id = match panel.source_guild_id {
+        Some(source) => {
+            if !crate::domain::guild_links::is_accepted(db, source, panel.guild_id).await? {
+                log::info!(
+                    "Removing panel for guild {}: link to source guild {source} is no longer accepted",
+                    panel.guild_id
+                );
+                return settle_refresh(db, panel, Err(EditFailure::DeadTarget)).await;
+            }
+            let Ok(source) = u64::try_from(source) else {
+                return settle_refresh(db, panel, Err(EditFailure::DeadTarget)).await;
+            };
+            serenity::GuildId::new(source)
+        }
+        None => serenity::GuildId::new(guild),
+    };
 
     let locale = i18n::resolve(None);
-    let guild_name = guild_display_name(cache_http, guild_id, &locale).await;
+    let guild_name = guild_display_name(cache_http, data_guild_id, &locale).await;
     let embed =
-        render::render_leaderboard(db, cache_http, guild_id, &guild_name, 1, &locale, false)
+        render::render_leaderboard(db, cache_http, data_guild_id, &guild_name, 1, &locale, false)
             .await?;
 
     let edit = serenity::ChannelId::new(channel)
@@ -437,17 +459,37 @@ pub(crate) async fn refresh_panel(
     settle_refresh(db, panel, outcome).await
 }
 
-/// Debounced-path refresh: loads the guild's record (it may have been
-/// deleted since the signal) and refreshes it.
+/// Debounced-path refresh: loads every panel whose EFFECTIVE data source is
+/// `guild_id` — its own panel (if any) plus every linked guild's panel that
+/// mirrors it (guild_links) — and refreshes each. A score change in the
+/// source guild must reach every guild currently displaying it.
+/// Every panel whose EFFECTIVE data source is `guild_id` — its own panel
+/// (if any) plus every linked guild's panel that mirrors it (guild_links).
+pub(crate) async fn panels_for_effective_guild(
+    db: &DatabaseConnection,
+    guild_id: i64,
+) -> anyhow::Result<Vec<leaderboard_panels::Model>> {
+    Ok(leaderboard_panels::Entity::find()
+        .filter(
+            sea_orm::Condition::any()
+                .add(leaderboard_panels::Column::GuildId.eq(guild_id))
+                .add(leaderboard_panels::Column::SourceGuildId.eq(guild_id)),
+        )
+        .all(db)
+        .await?)
+}
+
 async fn refresh_guild(
     db: &DatabaseConnection,
     cache_http: &impl serenity::CacheHttp,
     guild_id: i64,
-) -> anyhow::Result<PanelFate> {
-    match get_panel(db, guild_id).await? {
-        None => Ok(PanelFate::NoPanel),
-        Some(panel) => refresh_panel(db, cache_http, &panel).await,
+) -> anyhow::Result<Vec<PanelFate>> {
+    let panels = panels_for_effective_guild(db, guild_id).await?;
+    let mut fates = Vec::with_capacity(panels.len());
+    for panel in &panels {
+        fates.push(refresh_panel(db, cache_http, panel).await?);
     }
+    Ok(fates)
 }
 
 /// Full reconciliation sweep (F29 safety net + F32 cleanup): refreshes every
@@ -587,7 +629,7 @@ pub async fn run(
             _ = tokio::time::sleep_until(wake), if deadline.is_some() => {
                 if let Some(guild_id) = queue.take_one_due(Instant::now()) {
                     match refresh_guild(&db, &cache_http, guild_id).await {
-                        Ok(fate) => log::debug!("Panel refresh for guild {guild_id}: {fate:?}"),
+                        Ok(fates) => log::debug!("Panel refresh for guild {guild_id}: {fates:?}"),
                         Err(error) => {
                             log::error!("Panel refresh failed (guild={guild_id}): {error:#}");
                         }
@@ -710,7 +752,7 @@ mod tests {
     async fn save_panel_inserts_and_auto_registers_the_guild_row() {
         let db = fresh_db().await;
 
-        save_panel(&db, 1, 100, 200).await.expect("save");
+        save_panel(&db, 1, 100, 200, None).await.expect("save");
 
         let guild = guilds::Entity::find_by_id(1).one(&db).await.expect("query");
         assert!(guild.is_some(), "guild row auto-registered for the FK");
@@ -723,7 +765,7 @@ mod tests {
     async fn save_panel_does_not_clobber_an_existing_guild_row() {
         let db = fresh_db().await;
         insert_guild(&db, 1).await; // is_safe = true
-        save_panel(&db, 1, 100, 200).await.expect("save");
+        save_panel(&db, 1, 100, 200, None).await.expect("save");
         let guild = guilds::Entity::find_by_id(1)
             .one(&db)
             .await
@@ -735,8 +777,8 @@ mod tests {
     #[tokio::test]
     async fn save_panel_replaces_the_previous_record_one_panel_per_guild() {
         let db = fresh_db().await;
-        save_panel(&db, 1, 100, 200).await.expect("first save");
-        save_panel(&db, 1, 111, 222).await.expect("second save");
+        save_panel(&db, 1, 100, 200, None).await.expect("first save");
+        save_panel(&db, 1, 111, 222, None).await.expect("second save");
 
         let panels = all_panels(&db).await.expect("list");
         assert_eq!(panels.len(), 1, "one panel per guild (PK upsert)");
@@ -746,7 +788,7 @@ mod tests {
     #[tokio::test]
     async fn remove_panel_reports_whether_a_record_existed() {
         let db = fresh_db().await;
-        save_panel(&db, 1, 100, 200).await.expect("save");
+        save_panel(&db, 1, 100, 200, None).await.expect("save");
 
         assert!(remove_panel(&db, 1).await.expect("remove"), "record existed");
         assert!(!remove_panel(&db, 1).await.expect("remove again"), "already gone");
@@ -756,12 +798,38 @@ mod tests {
     #[tokio::test]
     async fn all_panels_lists_records_in_guild_order() {
         let db = fresh_db().await;
-        save_panel(&db, 7, 1, 1).await.expect("save");
-        save_panel(&db, 3, 2, 2).await.expect("save");
+        save_panel(&db, 7, 1, 1, None).await.expect("save");
+        save_panel(&db, 3, 2, 2, None).await.expect("save");
 
         let panels = all_panels(&db).await.expect("list");
         let ids: Vec<i64> = panels.iter().map(|panel| panel.guild_id).collect();
         assert_eq!(ids, vec![3, 7]);
+    }
+
+    // --- panels_for_effective_guild (cross-guild link fan-out) ---
+
+    #[tokio::test]
+    async fn panels_for_effective_guild_includes_own_panel_and_every_linked_one() {
+        let db = fresh_db().await;
+        // A's own panel (unlinked).
+        save_panel(&db, 1, 100, 200, None).await.expect("save A");
+        // B and C both mirror A.
+        save_panel(&db, 2, 300, 400, Some(1)).await.expect("save B");
+        save_panel(&db, 3, 500, 600, Some(1)).await.expect("save C");
+        // D mirrors a DIFFERENT source — must not show up for A's signal.
+        save_panel(&db, 4, 700, 800, Some(9)).await.expect("save D");
+
+        let mut guild_ids: Vec<i64> =
+            panels_for_effective_guild(&db, 1).await.unwrap().iter().map(|p| p.guild_id).collect();
+        guild_ids.sort();
+        assert_eq!(guild_ids, vec![1, 2, 3], "A's own panel plus every guild mirroring it");
+    }
+
+    #[tokio::test]
+    async fn panels_for_effective_guild_is_empty_when_nothing_matches() {
+        let db = fresh_db().await;
+        save_panel(&db, 1, 100, 200, None).await.expect("save");
+        assert!(panels_for_effective_guild(&db, 999).await.unwrap().is_empty());
     }
 
     async fn insert_stale_panel(db: &DatabaseConnection, guild_id: i64) {
@@ -771,6 +839,7 @@ mod tests {
             guild_id: Set(guild_id),
             channel_id: Set(100),
             message_id: Set(200),
+            source_guild_id: Set(None),
             created_at: Set(past),
             updated_at: Set(past),
         }
@@ -798,7 +867,7 @@ mod tests {
     #[tokio::test]
     async fn remove_panel_if_message_only_deletes_the_matching_record() {
         let db = fresh_db().await;
-        save_panel(&db, 1, 100, 200).await.expect("save");
+        save_panel(&db, 1, 100, 200, None).await.expect("save");
 
         // A stale message id (the record was replaced) must not delete.
         assert!(
@@ -851,7 +920,7 @@ mod tests {
 
         // Concurrent `/panel create` replaced the record while a refresh of
         // the OLD message (about to 404) was in flight.
-        save_panel(&db, 1, 111, 222).await.expect("replace");
+        save_panel(&db, 1, 111, 222, None).await.expect("replace");
 
         let fate = settle_refresh(&db, &stale, Err(EditFailure::DeadTarget))
             .await

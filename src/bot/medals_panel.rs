@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 use crate::bot::panel_updater::{classify_error, CacheAndHttp, EditFailure, SweepSlot, DEBOUNCE};
-use crate::entities::{active_medals_panels, guilds, trophies};
+use crate::entities::{active_medals_panels, guilds, medals_overview_panels, trophies};
 use crate::i18n::{self, LanguageIdentifier};
 
 /// Low-frequency reconciliation sweep interval — same cadence as the
@@ -165,6 +165,7 @@ pub(crate) async fn save_panel(
     category: &str,
     channel_id: i64,
     message_id: i64,
+    source_guild_id: Option<i64>,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now().naive_utc();
     let txn = db.begin().await?;
@@ -185,6 +186,7 @@ pub(crate) async fn save_panel(
         category: Set(category.to_string()),
         channel_id: Set(channel_id),
         message_id: Set(message_id),
+        source_guild_id: Set(source_guild_id),
         created_at: Set(now),
         updated_at: Set(now),
     })
@@ -196,6 +198,7 @@ pub(crate) async fn save_panel(
         .update_columns([
             active_medals_panels::Column::ChannelId,
             active_medals_panels::Column::MessageId,
+            active_medals_panels::Column::SourceGuildId,
             active_medals_panels::Column::UpdatedAt,
         ])
         .to_owned(),
@@ -220,6 +223,21 @@ pub(crate) async fn remove_panel(
         .exec(db)
         .await?;
     Ok(result.rows_affected > 0)
+}
+
+/// Every category panel `guild_id` has pointed at `source_guild_id` — used
+/// by `/link revoke` to find every panel that must be torn down when a link
+/// is severed (a linked guild may have panels for several categories).
+pub(crate) async fn panels_from_source(
+    db: &DatabaseConnection,
+    guild_id: i64,
+    source_guild_id: i64,
+) -> anyhow::Result<Vec<active_medals_panels::Model>> {
+    Ok(active_medals_panels::Entity::find()
+        .filter(active_medals_panels::Column::GuildId.eq(guild_id))
+        .filter(active_medals_panels::Column::SourceGuildId.eq(source_guild_id))
+        .all(db)
+        .await?)
 }
 
 /// Deletes ONE panel record by primary key, only if it still points at
@@ -253,13 +271,163 @@ pub(crate) async fn touch_panel(db: &DatabaseConnection, id: Uuid) -> anyhow::Re
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Overview panel persistence (medals_overview_panels — one per guild, PK)
+// ---------------------------------------------------------------------------
+
+/// The overview panel record for `guild_id`, if one exists (one per guild — PK).
+pub(crate) async fn get_overview_panel(
+    db: &DatabaseConnection,
+    guild_id: i64,
+) -> anyhow::Result<Option<medals_overview_panels::Model>> {
+    Ok(medals_overview_panels::Entity::find_by_id(guild_id).one(db).await?)
+}
+
+/// Every overview panel record, in stable guild order (sweep input).
+pub(crate) async fn all_overview_panels(
+    db: &DatabaseConnection,
+) -> anyhow::Result<Vec<medals_overview_panels::Model>> {
+    Ok(medals_overview_panels::Entity::find()
+        .order_by_asc(medals_overview_panels::Column::GuildId)
+        .all(db)
+        .await?)
+}
+
+/// Every overview panel whose EFFECTIVE data source is `guild_id` — its own
+/// panel (if any) plus every linked guild's overview panel mirroring it.
+pub(crate) async fn overview_panels_for_effective_guild(
+    db: &DatabaseConnection,
+    guild_id: i64,
+) -> anyhow::Result<Vec<medals_overview_panels::Model>> {
+    Ok(medals_overview_panels::Entity::find()
+        .filter(
+            sea_orm::Condition::any()
+                .add(medals_overview_panels::Column::GuildId.eq(guild_id))
+                .add(medals_overview_panels::Column::SourceGuildId.eq(guild_id)),
+        )
+        .all(db)
+        .await?)
+}
+
+/// Records the overview panel message for a guild, replacing any previous
+/// record (one panel per guild — PK upsert). Auto-registers the guild row.
+/// F31: callers MUST invoke this only after the Discord message was
+/// successfully sent.
+pub(crate) async fn save_overview_panel(
+    db: &DatabaseConnection,
+    guild_id: i64,
+    channel_id: i64,
+    message_id: i64,
+    source_guild_id: Option<i64>,
+) -> anyhow::Result<()> {
+    let now = chrono::Utc::now().naive_utc();
+    let txn = db.begin().await?;
+
+    guilds::Entity::insert(guilds::ActiveModel {
+        id: Set(guild_id),
+        is_safe: Set(false),
+        created_at: Set(now),
+        updated_at: Set(now),
+    })
+    .on_conflict(OnConflict::column(guilds::Column::Id).do_nothing().to_owned())
+    .exec_without_returning(&txn)
+    .await?;
+
+    medals_overview_panels::Entity::insert(medals_overview_panels::ActiveModel {
+        guild_id: Set(guild_id),
+        channel_id: Set(channel_id),
+        message_id: Set(message_id),
+        source_guild_id: Set(source_guild_id),
+        created_at: Set(now),
+        updated_at: Set(now),
+    })
+    .on_conflict(
+        OnConflict::column(medals_overview_panels::Column::GuildId)
+            .update_columns([
+                medals_overview_panels::Column::ChannelId,
+                medals_overview_panels::Column::MessageId,
+                medals_overview_panels::Column::SourceGuildId,
+                medals_overview_panels::Column::UpdatedAt,
+            ])
+            .to_owned(),
+    )
+    .exec_without_returning(&txn)
+    .await?;
+
+    txn.commit().await?;
+    Ok(())
+}
+
+/// Deletes the guild's overview panel record. Returns whether one existed.
+pub(crate) async fn remove_overview_panel(db: &DatabaseConnection, guild_id: i64) -> anyhow::Result<bool> {
+    let result = medals_overview_panels::Entity::delete_by_id(guild_id).exec(db).await?;
+    Ok(result.rows_affected > 0)
+}
+
+/// Deletes the guild's overview panel record ONLY if it still points at
+/// `message_id` (F32 stale-refresh guard, same rationale as `panel_updater`).
+pub(crate) async fn remove_overview_panel_if_message(
+    db: &DatabaseConnection,
+    guild_id: i64,
+    message_id: i64,
+) -> anyhow::Result<bool> {
+    let result = medals_overview_panels::Entity::delete_many()
+        .filter(medals_overview_panels::Column::GuildId.eq(guild_id))
+        .filter(medals_overview_panels::Column::MessageId.eq(message_id))
+        .exec(db)
+        .await?;
+    Ok(result.rows_affected > 0)
+}
+
+/// Marks a successful render. A vanished row is a no-op, not an error.
+pub(crate) async fn touch_overview_panel(db: &DatabaseConnection, guild_id: i64) -> anyhow::Result<()> {
+    medals_overview_panels::Entity::update_many()
+        .set(medals_overview_panels::ActiveModel {
+            updated_at: Set(chrono::Utc::now().naive_utc()),
+            ..Default::default()
+        })
+        .filter(medals_overview_panels::Column::GuildId.eq(guild_id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// Best-effort deletion of an overview panel's Discord message.
+pub(crate) async fn delete_overview_panel_message(
+    http: impl AsRef<serenity::Http>,
+    panel: &medals_overview_panels::Model,
+) {
+    let (Ok(channel_id), Ok(message_id)) =
+        (u64::try_from(panel.channel_id), u64::try_from(panel.message_id))
+    else {
+        return;
+    };
+    if let Err(error) = serenity::ChannelId::new(channel_id)
+        .delete_message(http, serenity::MessageId::new(message_id))
+        .await
+    {
+        log::warn!(
+            "Could not delete medals overview panel message (guild={}, channel={channel_id}, message={message_id}): {error}",
+            panel.guild_id
+        );
+    }
+}
+
 /// Poise autocomplete callback for `/panel medals`'s `category` option: the
 /// guild's distinct categories, prefix-matched case-insensitively.
 pub async fn autocomplete_category(ctx: crate::bot::Context<'_>, partial: &str) -> Vec<String> {
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
-    match distinct_categories(&ctx.data().db, guild_id.get() as i64).await {
+    let db = &ctx.data().db;
+    // Cross-guild link: a linked guild has no categories of its own — show
+    // the source guild's instead, matching what `/panel medals create` will
+    // actually render.
+    let effective = crate::domain::guild_links::accepted_source_for(db, guild_id.get() as i64)
+        .await
+        .unwrap_or_default()
+        .unwrap_or(guild_id.get() as i64);
+    match distinct_categories(db, effective).await {
         Ok(categories) => {
             let needle = partial.to_lowercase();
             categories
@@ -278,6 +446,20 @@ pub async fn autocomplete_category(ctx: crate::bot::Context<'_>, partial: &str) 
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
+
+/// One `emoji **name** — description` line, shared by the single-category
+/// and overview renderers.
+fn medal_row(locale: &LanguageIdentifier, medal: &trophies::Model) -> String {
+    i18n::t_args(
+        locale,
+        "medals-panel-row",
+        &[
+            ("emoji", medal.emoji.clone().into()),
+            ("name", medal.name.clone().into()),
+            ("description", medal.description.clone().into()),
+        ],
+    )
+}
 
 /// Builds the catalog embed for one guild+category: every ACTIVE trophy in
 /// it, alphabetical, name + description. Empty → a localized placeholder.
@@ -298,21 +480,7 @@ pub async fn render_category_embed(
     let body = if medals.is_empty() {
         i18n::t(locale, "medals-panel-empty")
     } else {
-        medals
-            .iter()
-            .map(|t| {
-                i18n::t_args(
-                    locale,
-                    "medals-panel-row",
-                    &[
-                        ("emoji", t.emoji.clone().into()),
-                        ("name", t.name.clone().into()),
-                        ("description", t.description.clone().into()),
-                    ],
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        medals.iter().map(|t| medal_row(locale, t)).collect::<Vec<_>>().join("\n")
     };
 
     Ok(serenity::CreateEmbed::new()
@@ -321,13 +489,76 @@ pub async fn render_category_embed(
         .colour(crate::bot::util::COLOR_MAIN))
 }
 
+/// Discord's hard cap on embed fields — categories beyond this are dropped
+/// (alphabetically last), with a footer note.
+const MAX_OVERVIEW_FIELDS: usize = 25;
+/// Discord's hard cap on one embed field's value.
+const MAX_FIELD_VALUE_CHARS: usize = 1024;
+
+/// Builds the "all categories" catalog embed: every ACTIVE, CATEGORIZED
+/// trophy in the guild, one field per category (alphabetical), each field
+/// listing that category's medals the same way [`render_category_embed`]
+/// does. Uncategorized trophies never appear here either — consistent with
+/// the single-category panel. Empty → a localized placeholder.
+pub async fn render_overview_embed(
+    db: &DatabaseConnection,
+    guild_id: i64,
+    locale: &LanguageIdentifier,
+) -> anyhow::Result<serenity::CreateEmbed> {
+    let medals = trophies::Entity::find()
+        .filter(trophies::Column::GuildId.eq(guild_id))
+        .filter(trophies::Column::Category.is_not_null())
+        .filter(trophies::Column::Active.eq(true))
+        .order_by_asc(trophies::Column::Category)
+        .order_by_asc(trophies::Column::Name)
+        .all(db)
+        .await?;
+
+    let mut embed = serenity::CreateEmbed::new()
+        .title(i18n::t(locale, "medals-overview-title"))
+        .colour(crate::bot::util::COLOR_MAIN);
+
+    if medals.is_empty() {
+        return Ok(embed.description(i18n::t(locale, "medals-overview-empty")));
+    }
+
+    // `medals` is already sorted by category then name, so same-category
+    // trophies are contiguous — one pass groups them without a HashMap.
+    let mut categories: Vec<(String, Vec<&trophies::Model>)> = Vec::new();
+    for medal in &medals {
+        let category = medal.category.clone().expect("filtered to categorized trophies");
+        match categories.last_mut() {
+            Some((name, group)) if *name == category => group.push(medal),
+            _ => categories.push((category, vec![medal])),
+        }
+    }
+
+    let truncated = categories.len() > MAX_OVERVIEW_FIELDS;
+    for (category, group) in categories.into_iter().take(MAX_OVERVIEW_FIELDS) {
+        let mut value = group.iter().map(|t| medal_row(locale, t)).collect::<Vec<_>>().join("\n");
+        if value.chars().count() > MAX_FIELD_VALUE_CHARS {
+            let note = i18n::t(locale, "medals-overview-truncated");
+            let budget = MAX_FIELD_VALUE_CHARS.saturating_sub(note.chars().count() + 1);
+            let cut: String = value.chars().take(budget).collect();
+            value = format!("{cut}\n{note}");
+        }
+        embed = embed.field(category, value, false);
+    }
+    if truncated {
+        embed = embed.footer(serenity::CreateEmbedFooter::new(i18n::t(
+            locale,
+            "medals-overview-more-categories",
+        )));
+    }
+    Ok(embed)
+}
+
 // ---------------------------------------------------------------------------
 // Refresh outcome handling (F32) — same shape as panel_updater's.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PanelFate {
-    NoPanel,
     Updated,
     RemovedDead,
     Superseded,
@@ -396,8 +627,28 @@ pub(crate) async fn refresh_panel(
         return settle_refresh(db, panel, Err(EditFailure::DeadTarget)).await;
     };
 
+    // Cross-guild link: render the source guild's category instead of this
+    // panel's own, re-validating the link is still accepted on EVERY
+    // refresh (not just trusting the stored column) — a revoked link stops
+    // leaking data on the very next refresh.
+    let data_guild_id = match panel.source_guild_id {
+        Some(source) => {
+            if !crate::domain::guild_links::is_accepted(db, source, panel.guild_id).await? {
+                log::info!(
+                    "Removing medals panel {} (guild={}, category={:?}): link to source guild {source} is no longer accepted",
+                    panel.id,
+                    panel.guild_id,
+                    panel.category
+                );
+                return settle_refresh(db, panel, Err(EditFailure::DeadTarget)).await;
+            }
+            source
+        }
+        None => panel.guild_id,
+    };
+
     let locale = i18n::resolve(None);
-    let embed = render_category_embed(db, panel.guild_id, &panel.category, &locale).await?;
+    let embed = render_category_embed(db, data_guild_id, &panel.category, &locale).await?;
 
     let edit = serenity::ChannelId::new(channel)
         .edit_message(
@@ -422,16 +673,120 @@ pub(crate) async fn refresh_panel(
     settle_refresh(db, panel, outcome).await
 }
 
+/// [`settle_refresh`]'s counterpart for the guild-PK-keyed overview panel.
+pub(crate) async fn settle_refresh_overview(
+    db: &DatabaseConnection,
+    panel: &medals_overview_panels::Model,
+    outcome: Result<(), EditFailure>,
+) -> anyhow::Result<PanelFate> {
+    match outcome {
+        Ok(()) => {
+            touch_overview_panel(db, panel.guild_id).await?;
+            Ok(PanelFate::Updated)
+        }
+        Err(EditFailure::DeadTarget) => {
+            if remove_overview_panel_if_message(db, panel.guild_id, panel.message_id).await? {
+                log::info!(
+                    "Removed medals overview panel for guild {}: target channel/message is gone (F32)",
+                    panel.guild_id
+                );
+                Ok(PanelFate::RemovedDead)
+            } else {
+                Ok(PanelFate::Superseded)
+            }
+        }
+        Err(EditFailure::Transient) => Ok(PanelFate::KeptAfterError),
+    }
+}
+
+/// [`refresh_panel`]'s counterpart for the overview panel.
+pub(crate) async fn refresh_overview_panel(
+    db: &DatabaseConnection,
+    cache_http: &impl serenity::CacheHttp,
+    panel: &medals_overview_panels::Model,
+) -> anyhow::Result<PanelFate> {
+    let (Ok(channel), Ok(message)) =
+        (u64::try_from(panel.channel_id), u64::try_from(panel.message_id))
+    else {
+        return settle_refresh_overview(db, panel, Err(EditFailure::DeadTarget)).await;
+    };
+
+    let data_guild_id = match panel.source_guild_id {
+        Some(source) => {
+            if !crate::domain::guild_links::is_accepted(db, source, panel.guild_id).await? {
+                log::info!(
+                    "Removing medals overview panel (guild={}): link to source guild {source} is no longer accepted",
+                    panel.guild_id
+                );
+                return settle_refresh_overview(db, panel, Err(EditFailure::DeadTarget)).await;
+            }
+            source
+        }
+        None => panel.guild_id,
+    };
+
+    let locale = i18n::resolve(None);
+    let embed = render_overview_embed(db, data_guild_id, &locale).await?;
+
+    let edit = serenity::ChannelId::new(channel)
+        .edit_message(
+            cache_http,
+            serenity::MessageId::new(message),
+            serenity::EditMessage::new().content("").embed(embed),
+        )
+        .await;
+
+    let outcome = match edit {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let failure = classify_error(&error);
+            log::warn!(
+                "Medals overview panel edit failed (guild={}, channel={channel}, message={message}, {failure:?}): {error}",
+                panel.guild_id
+            );
+            Err(failure)
+        }
+    };
+    settle_refresh_overview(db, panel, outcome).await
+}
+
+/// Every panel whose EFFECTIVE data source is `(guild_id, category)` — its
+/// own panel (if any) plus every linked guild's panel mirroring it.
+pub(crate) async fn panels_for_effective_key(
+    db: &DatabaseConnection,
+    guild_id: i64,
+    category: &str,
+) -> anyhow::Result<Vec<active_medals_panels::Model>> {
+    Ok(active_medals_panels::Entity::find()
+        .filter(active_medals_panels::Column::Category.eq(category))
+        .filter(
+            sea_orm::Condition::any()
+                .add(active_medals_panels::Column::GuildId.eq(guild_id))
+                .add(active_medals_panels::Column::SourceGuildId.eq(guild_id)),
+        )
+        .all(db)
+        .await?)
+}
+
+/// Refreshes every category panel for `key`, plus the overview panel(s) for
+/// its guild — an overview panel piggybacks on the SAME per-category signal
+/// (any category change is exactly what the overview must reflect too),
+/// rather than needing its own signal channel/debounce queue.
 async fn refresh_key(
     db: &DatabaseConnection,
     cache_http: &impl serenity::CacheHttp,
     key: &PanelKey,
-) -> anyhow::Result<PanelFate> {
+) -> anyhow::Result<Vec<PanelFate>> {
     let (guild_id, category) = key;
-    match get_panel(db, *guild_id, category).await? {
-        None => Ok(PanelFate::NoPanel),
-        Some(panel) => refresh_panel(db, cache_http, &panel).await,
+    let panels = panels_for_effective_key(db, *guild_id, category).await?;
+    let mut fates = Vec::with_capacity(panels.len());
+    for panel in &panels {
+        fates.push(refresh_panel(db, cache_http, panel).await?);
     }
+    for panel in overview_panels_for_effective_guild(db, *guild_id).await? {
+        fates.push(refresh_overview_panel(db, cache_http, &panel).await?);
+    }
+    Ok(fates)
 }
 
 async fn reconcile_all(
@@ -446,7 +801,18 @@ async fn reconcile_all(
             return;
         }
     };
-    log::info!("Medals panel reconciliation sweep started: {} panels", panels.len());
+    let overview_panels = match all_overview_panels(db).await {
+        Ok(panels) => panels,
+        Err(error) => {
+            log::error!("Medals overview panel sweep could not list panels: {error:#}");
+            Vec::new()
+        }
+    };
+    log::info!(
+        "Medals panel reconciliation sweep started: {} category panels, {} overview panels",
+        panels.len(),
+        overview_panels.len()
+    );
 
     let (mut updated, mut removed, mut kept) = (0usize, 0usize, 0usize);
     for panel in &panels {
@@ -461,6 +827,25 @@ async fn reconcile_all(
             Err(error) => {
                 kept += 1;
                 log::error!("Medals panel sweep refresh failed (id={}): {error:#}", panel.id);
+            }
+        }
+        tokio::time::sleep(SWEEP_PACING).await;
+    }
+    for panel in &overview_panels {
+        if *shutdown.borrow() {
+            log::info!("Medals overview panel sweep aborted by shutdown");
+            return;
+        }
+        match refresh_overview_panel(db, cache_http, panel).await {
+            Ok(PanelFate::Updated) => updated += 1,
+            Ok(PanelFate::RemovedDead) => removed += 1,
+            Ok(_) => kept += 1,
+            Err(error) => {
+                kept += 1;
+                log::error!(
+                    "Medals overview panel sweep refresh failed (guild={}): {error:#}",
+                    panel.guild_id
+                );
             }
         }
         tokio::time::sleep(SWEEP_PACING).await;
@@ -520,7 +905,7 @@ pub async fn run(
             _ = tokio::time::sleep_until(wake), if deadline.is_some() => {
                 if let Some(key) = queue.take_one_due(Instant::now()) {
                     match refresh_key(&db, &cache_http, &key).await {
-                        Ok(fate) => log::debug!("Medals panel refresh for {key:?}: {fate:?}"),
+                        Ok(fates) => log::debug!("Medals panel refresh for {key:?}: {fates:?}"),
                         Err(error) => {
                             log::error!("Medals panel refresh failed ({key:?}): {error:#}");
                         }
@@ -580,7 +965,7 @@ mod tests {
     async fn save_panel_inserts_and_auto_registers_the_guild_row() {
         let db = fresh_db().await;
 
-        save_panel(&db, 1, "Government", 100, 200).await.expect("save");
+        save_panel(&db, 1, "Government", 100, 200, None).await.expect("save");
 
         let guild = guilds::Entity::find_by_id(1).one(&db).await.expect("query");
         assert!(guild.is_some(), "guild row auto-registered for the FK");
@@ -592,9 +977,9 @@ mod tests {
     #[tokio::test]
     async fn save_panel_upserts_per_category_not_per_guild() {
         let db = fresh_db().await;
-        save_panel(&db, 1, "Government", 100, 200).await.expect("save gov");
-        save_panel(&db, 1, "Recurring", 111, 222).await.expect("save rec");
-        save_panel(&db, 1, "Government", 100, 999).await.expect("replace gov");
+        save_panel(&db, 1, "Government", 100, 200, None).await.expect("save gov");
+        save_panel(&db, 1, "Recurring", 111, 222, None).await.expect("save rec");
+        save_panel(&db, 1, "Government", 100, 999, None).await.expect("replace gov");
 
         let panels = all_panels(&db).await.expect("list");
         assert_eq!(panels.len(), 2, "one panel per category, not per guild");
@@ -607,7 +992,7 @@ mod tests {
     #[tokio::test]
     async fn remove_panel_reports_whether_a_record_existed() {
         let db = fresh_db().await;
-        save_panel(&db, 1, "Government", 100, 200).await.expect("save");
+        save_panel(&db, 1, "Government", 100, 200, None).await.expect("save");
 
         assert!(remove_panel(&db, 1, "Government").await.expect("remove"));
         assert!(!remove_panel(&db, 1, "Government").await.expect("remove again"));
@@ -617,7 +1002,7 @@ mod tests {
     #[tokio::test]
     async fn remove_panel_if_message_only_deletes_the_matching_record() {
         let db = fresh_db().await;
-        save_panel(&db, 1, "Government", 100, 200).await.expect("save");
+        save_panel(&db, 1, "Government", 100, 200, None).await.expect("save");
         let panel = get_panel(&db, 1, "Government").await.expect("get").expect("row");
 
         assert!(!remove_panel_if_message(&db, panel.id, 999).await.expect("mismatch"));
@@ -630,7 +1015,7 @@ mod tests {
     #[tokio::test]
     async fn touch_panel_bumps_updated_at_and_ignores_missing_rows() {
         let db = fresh_db().await;
-        save_panel(&db, 1, "Government", 100, 200).await.expect("save");
+        save_panel(&db, 1, "Government", 100, 200, None).await.expect("save");
         let before = get_panel(&db, 1, "Government").await.expect("get").expect("row").updated_at;
 
         let id = get_panel(&db, 1, "Government").await.expect("get").expect("row").id;
@@ -643,6 +1028,116 @@ mod tests {
 
     // --- settle_refresh (F31/F32 record lifecycle) ---
 
+    // --- panels_for_effective_key (cross-guild link fan-out) ---
+
+    #[tokio::test]
+    async fn panels_for_effective_key_includes_own_panel_and_every_linked_one() {
+        let db = fresh_db().await;
+        save_panel(&db, 1, "Government", 100, 200, None).await.expect("save A");
+        save_panel(&db, 2, "Government", 300, 400, Some(1)).await.expect("save B");
+        save_panel(&db, 3, "Government", 500, 600, Some(1)).await.expect("save C");
+        // Different category — must not match even for the same source.
+        save_panel(&db, 1, "Recurring", 700, 800, None).await.expect("save A recurring");
+        // Different source guild — must not match A's signal.
+        save_panel(&db, 4, "Government", 900, 1000, Some(9)).await.expect("save D");
+
+        let mut guild_ids: Vec<i64> = panels_for_effective_key(&db, 1, "Government")
+            .await
+            .unwrap()
+            .iter()
+            .map(|p| p.guild_id)
+            .collect();
+        guild_ids.sort();
+        assert_eq!(guild_ids, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn panels_for_effective_key_is_empty_when_nothing_matches() {
+        let db = fresh_db().await;
+        save_panel(&db, 1, "Government", 100, 200, None).await.expect("save");
+        assert!(panels_for_effective_key(&db, 1, "Recurring").await.unwrap().is_empty());
+        assert!(panels_for_effective_key(&db, 999, "Government").await.unwrap().is_empty());
+    }
+
+    // --- overview panel persistence ---
+
+    #[tokio::test]
+    async fn save_overview_panel_inserts_and_auto_registers_the_guild_row() {
+        let db = fresh_db().await;
+        save_overview_panel(&db, 1, 100, 200, None).await.expect("save");
+
+        let guild = guilds::Entity::find_by_id(1).one(&db).await.expect("query");
+        assert!(guild.is_some(), "guild row auto-registered for the FK");
+
+        let panel = get_overview_panel(&db, 1).await.expect("get").expect("row");
+        assert_eq!((panel.channel_id, panel.message_id), (100, 200));
+    }
+
+    #[tokio::test]
+    async fn save_overview_panel_replaces_the_previous_record_one_per_guild() {
+        let db = fresh_db().await;
+        save_overview_panel(&db, 1, 100, 200, None).await.expect("first save");
+        save_overview_panel(&db, 1, 111, 222, None).await.expect("second save");
+
+        let panels = all_overview_panels(&db).await.expect("list");
+        assert_eq!(panels.len(), 1, "one overview panel per guild");
+        assert_eq!((panels[0].channel_id, panels[0].message_id), (111, 222));
+    }
+
+    #[tokio::test]
+    async fn remove_overview_panel_reports_whether_a_record_existed() {
+        let db = fresh_db().await;
+        save_overview_panel(&db, 1, 100, 200, None).await.expect("save");
+
+        assert!(remove_overview_panel(&db, 1).await.expect("remove"));
+        assert!(!remove_overview_panel(&db, 1).await.expect("remove again"));
+        assert!(get_overview_panel(&db, 1).await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_overview_panel_if_message_only_deletes_the_matching_record() {
+        let db = fresh_db().await;
+        save_overview_panel(&db, 1, 100, 200, None).await.expect("save");
+
+        assert!(!remove_overview_panel_if_message(&db, 1, 999).await.expect("mismatch"));
+        assert!(get_overview_panel(&db, 1).await.expect("get").is_some());
+        assert!(remove_overview_panel_if_message(&db, 1, 200).await.expect("match"));
+        assert!(get_overview_panel(&db, 1).await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn touch_overview_panel_bumps_updated_at_and_ignores_missing_rows() {
+        let db = fresh_db().await;
+        save_overview_panel(&db, 1, 100, 200, None).await.expect("save");
+        let before = get_overview_panel(&db, 1).await.expect("get").expect("row").updated_at;
+
+        touch_overview_panel(&db, 1).await.expect("touch");
+        let after = get_overview_panel(&db, 1).await.expect("get").expect("row").updated_at;
+        assert!(after >= before);
+
+        touch_overview_panel(&db, 999).await.expect("touch missing row");
+    }
+
+    // --- overview_panels_for_effective_guild (cross-guild link fan-out) ---
+
+    #[tokio::test]
+    async fn overview_panels_for_effective_guild_includes_own_and_every_linked_one() {
+        let db = fresh_db().await;
+        save_overview_panel(&db, 1, 100, 200, None).await.expect("save A");
+        save_overview_panel(&db, 2, 300, 400, Some(1)).await.expect("save B");
+        save_overview_panel(&db, 3, 500, 600, Some(1)).await.expect("save C");
+        save_overview_panel(&db, 4, 700, 800, Some(9)).await.expect("save D (different source)");
+
+        let mut guild_ids: Vec<i64> = overview_panels_for_effective_guild(&db, 1)
+            .await
+            .unwrap()
+            .iter()
+            .map(|p| p.guild_id)
+            .collect();
+        guild_ids.sort();
+        assert_eq!(guild_ids, vec![1, 2, 3]);
+    }
+
     async fn insert_stale_panel(db: &DatabaseConnection, guild_id: i64) -> active_medals_panels::Model {
         insert_guild(db, guild_id).await;
         let past = now() - chrono::Duration::days(30);
@@ -652,6 +1147,7 @@ mod tests {
             category: Set("Government".to_string()),
             channel_id: Set(100),
             message_id: Set(200),
+            source_guild_id: Set(None),
             created_at: Set(past),
             updated_at: Set(past),
         }
@@ -686,7 +1182,7 @@ mod tests {
         let db = fresh_db().await;
         let stale = insert_stale_panel(&db, 1).await;
 
-        save_panel(&db, 1, "Government", 111, 222).await.expect("replace");
+        save_panel(&db, 1, "Government", 111, 222, None).await.expect("replace");
 
         let fate = settle_refresh(&db, &stale, Err(EditFailure::DeadTarget)).await.expect("settle");
         assert_eq!(fate, PanelFate::Superseded);
@@ -702,6 +1198,75 @@ mod tests {
         let fate = settle_refresh(&db, &panel, Err(EditFailure::Transient)).await.expect("settle");
         assert_eq!(fate, PanelFate::KeptAfterError);
         let row = get_panel(&db, 1, "Government").await.expect("get").expect("row");
+        assert_eq!(row.updated_at, panel.updated_at);
+    }
+
+    // --- settle_refresh_overview (F31/F32 record lifecycle) ---
+
+    async fn insert_stale_overview_panel(
+        db: &DatabaseConnection,
+        guild_id: i64,
+    ) -> medals_overview_panels::Model {
+        insert_guild(db, guild_id).await;
+        let past = now() - chrono::Duration::days(30);
+        medals_overview_panels::ActiveModel {
+            guild_id: Set(guild_id),
+            channel_id: Set(100),
+            message_id: Set(200),
+            source_guild_id: Set(None),
+            created_at: Set(past),
+            updated_at: Set(past),
+        }
+        .insert(db)
+        .await
+        .expect("insert panel")
+    }
+
+    #[tokio::test]
+    async fn overview_successful_refresh_touches_the_record() {
+        let db = fresh_db().await;
+        let panel = insert_stale_overview_panel(&db, 1).await;
+
+        let fate = settle_refresh_overview(&db, &panel, Ok(())).await.expect("settle");
+        assert_eq!(fate, PanelFate::Updated);
+        let after = get_overview_panel(&db, 1).await.expect("get").expect("row").updated_at;
+        assert!(after > panel.updated_at);
+    }
+
+    #[tokio::test]
+    async fn overview_dead_target_removes_the_record_f32() {
+        let db = fresh_db().await;
+        let panel = insert_stale_overview_panel(&db, 1).await;
+
+        let fate =
+            settle_refresh_overview(&db, &panel, Err(EditFailure::DeadTarget)).await.expect("settle");
+        assert_eq!(fate, PanelFate::RemovedDead);
+        assert!(get_overview_panel(&db, 1).await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn overview_dead_target_on_a_replaced_record_keeps_the_fresh_panel() {
+        let db = fresh_db().await;
+        let stale = insert_stale_overview_panel(&db, 1).await;
+
+        save_overview_panel(&db, 1, 111, 222, None).await.expect("replace");
+
+        let fate =
+            settle_refresh_overview(&db, &stale, Err(EditFailure::DeadTarget)).await.expect("settle");
+        assert_eq!(fate, PanelFate::Superseded);
+        let fresh = get_overview_panel(&db, 1).await.expect("get").expect("row");
+        assert_eq!((fresh.channel_id, fresh.message_id), (111, 222));
+    }
+
+    #[tokio::test]
+    async fn overview_transient_failure_keeps_the_record_untouched() {
+        let db = fresh_db().await;
+        let panel = insert_stale_overview_panel(&db, 1).await;
+
+        let fate =
+            settle_refresh_overview(&db, &panel, Err(EditFailure::Transient)).await.expect("settle");
+        assert_eq!(fate, PanelFate::KeptAfterError);
+        let row = get_overview_panel(&db, 1).await.expect("get").expect("row");
         assert_eq!(row.updated_at, panel.updated_at);
     }
 
@@ -780,6 +1345,63 @@ mod tests {
         assert_ne!(description, "medals-panel-empty", "catalog key must exist");
     }
 
+    // --- render_overview_embed ---
+
+    #[tokio::test]
+    async fn overview_groups_active_categorized_medals_by_category_alphabetically() {
+        let db = fresh_db().await;
+        insert_trophy(&db, 1, "Zebra Medal", Some("Recurring"), true).await;
+        insert_trophy(&db, 1, "Bronze Medal", Some("Government"), true).await;
+        insert_trophy(&db, 1, "Gold Medal", Some("Government"), true).await;
+        insert_trophy(&db, 1, "Retired Medal", Some("Government"), false).await;
+        insert_trophy(&db, 1, "Loose Medal", None, true).await;
+
+        let locale = i18n::resolve(None);
+        let embed = render_overview_embed(&db, 1, &locale).await.expect("render");
+        let json = serde_json::to_value(&embed).expect("serialize");
+        let fields = json["fields"].as_array().expect("fields present");
+
+        let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["Government", "Recurring"], "categories sorted alphabetically");
+
+        let government = fields[0]["value"].as_str().unwrap();
+        assert!(government.contains("Bronze Medal") && government.contains("Gold Medal"));
+        assert!(!government.contains("Retired Medal"), "inactive medal excluded");
+        assert!(!government.contains("Loose Medal"), "uncategorized medal excluded from overview");
+
+        let recurring = fields[1]["value"].as_str().unwrap();
+        assert!(recurring.contains("Zebra Medal"));
+    }
+
+    #[tokio::test]
+    async fn overview_shows_a_placeholder_when_nothing_categorized_is_active() {
+        let db = fresh_db().await;
+        insert_trophy(&db, 1, "Uncategorized", None, true).await;
+        insert_trophy(&db, 1, "Retired", Some("Government"), false).await;
+
+        let locale = i18n::resolve(None);
+        let embed = render_overview_embed(&db, 1, &locale).await.expect("render");
+        let json = serde_json::to_value(&embed).expect("serialize");
+        assert_eq!(json["description"].as_str().unwrap(), i18n::t(&locale, "medals-overview-empty"));
+        assert!(json.get("fields").is_none() || json["fields"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn overview_caps_fields_at_the_discord_limit_and_notes_truncation() {
+        let db = fresh_db().await;
+        for i in 0..30 {
+            insert_trophy(&db, 1, &format!("Medal {i:02}"), Some(&format!("Category {i:02}")), true)
+                .await;
+        }
+
+        let locale = i18n::resolve(None);
+        let embed = render_overview_embed(&db, 1, &locale).await.expect("render");
+        let json = serde_json::to_value(&embed).expect("serialize");
+        let fields = json["fields"].as_array().expect("fields present");
+        assert_eq!(fields.len(), MAX_OVERVIEW_FIELDS);
+        assert!(json["footer"]["text"].as_str().unwrap().len() > 0, "truncation footer present");
+    }
+
     // --- distinct_categories ---
 
     #[tokio::test]
@@ -817,5 +1439,13 @@ mod tests {
             "medals-panel-row"
         );
         assert_ne!(i18n::t(&locale, "medals-panel-empty"), "medals-panel-empty");
+        for key in [
+            "medals-overview-title",
+            "medals-overview-empty",
+            "medals-overview-truncated",
+            "medals-overview-more-categories",
+        ] {
+            assert_ne!(i18n::t(&locale, key), key, "missing catalog key {key}");
+        }
     }
 }

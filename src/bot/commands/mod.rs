@@ -22,6 +22,7 @@ mod help;
 mod imsafe;
 mod invite;
 mod leaderboard;
+mod link;
 mod panel;
 mod permissions;
 mod ping;
@@ -68,6 +69,7 @@ pub fn all() -> Vec<poise::Command<Data, Error>> {
         settings::settings(),
         rewards::rewards(),
         panel::panel(),
+        link::link(),
         export::export(),
     ]
 }
@@ -88,14 +90,15 @@ mod tests {
     }
 
     #[test]
-    fn registers_all_24_commands() {
+    fn registers_all_25_commands() {
         let commands = all();
-        assert_eq!(commands.len(), 24);
+        assert_eq!(commands.len(), 25);
 
         let expected = [
             "ping", "about", "help", "invite", "support", "suggest", "stats", "imsafe",
             "permissions", "forgetme", "create", "edit", "delete", "award", "revoke", "clear",
-            "details", "show", "trophies", "leaderboard", "settings", "rewards", "panel", "export",
+            "details", "show", "trophies", "leaderboard", "settings", "rewards", "panel", "link",
+            "export",
         ];
         for name in expected {
             find(&commands, name);
@@ -111,7 +114,7 @@ mod tests {
         let commands = all();
         for name in [
             "imsafe", "permissions", "create", "edit", "delete", "award", "revoke", "clear",
-            "details", "settings", "rewards", "panel",
+            "details", "settings", "rewards", "panel", "link",
         ] {
             let command = &commands[find(&commands, name)];
             assert_eq!(

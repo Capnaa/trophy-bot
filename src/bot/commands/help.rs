@@ -51,6 +51,9 @@ mod tests {
             "/settings",
             "/rewards",
             "/panel",
+            "/panel medals",
+            "/panel overview",
+            "/link",
             "/export",
         ] {
             assert!(description.contains(command), "missing {command}");

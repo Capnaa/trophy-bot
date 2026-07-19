@@ -1133,6 +1133,7 @@ mod tests {
             guild_id: Set(guild_id),
             channel_id: Set(600),
             message_id: Set(700),
+            source_guild_id: Set(None),
             created_at: Set(now()),
             updated_at: Set(now()),
         }

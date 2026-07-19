@@ -8,9 +8,11 @@
 
 pub mod active_medals_panels;
 pub mod bot_stats;
+pub mod guild_links;
 pub mod guild_settings;
 pub mod guilds;
 pub mod leaderboard_panels;
+pub mod medals_overview_panels;
 pub mod role_rewards;
 pub mod trophies;
 pub mod user_trophies;
@@ -26,9 +28,11 @@ mod tests {
         use super::*;
         assert_eq!(active_medals_panels::Entity.table_name(), "active_medals_panels");
         assert_eq!(bot_stats::Entity.table_name(), "bot_stats");
+        assert_eq!(guild_links::Entity.table_name(), "guild_links");
         assert_eq!(guild_settings::Entity.table_name(), "guild_settings");
         assert_eq!(guilds::Entity.table_name(), "guilds");
         assert_eq!(leaderboard_panels::Entity.table_name(), "leaderboard_panels");
+        assert_eq!(medals_overview_panels::Entity.table_name(), "medals_overview_panels");
         assert_eq!(role_rewards::Entity.table_name(), "role_rewards");
         assert_eq!(trophies::Entity.table_name(), "trophies");
         assert_eq!(user_trophies::Entity.table_name(), "user_trophies");

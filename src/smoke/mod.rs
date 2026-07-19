@@ -664,7 +664,7 @@ async fn step_panel(
         .send_message(http, CreateMessage::new().embed(embed))
         .await
         .map_err(|e| report.fail(STEP, format!("sending the panel message: {e}")))?;
-    panel_updater::save_panel(db, gid, channel.id.get() as i64, message.id.get() as i64)
+    panel_updater::save_panel(db, gid, channel.id.get() as i64, message.id.get() as i64, None)
         .await
         .map_err(|e| report.fail(STEP, format!("save_panel failed: {e:#}")))?;
 
