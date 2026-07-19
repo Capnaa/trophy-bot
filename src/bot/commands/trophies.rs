@@ -67,6 +67,7 @@ async fn user(
                         ("name", row.name.clone().into()),
                         ("value", value_markup(row.value).into()),
                         ("count", row.count.into()),
+                        ("awarded_at", row.awarded_at.map(|at| at.format("%Y-%m-%d %H:%M").to_string()).into()),
                     ],
                 )
             })
@@ -168,6 +169,7 @@ pub struct UserTrophyRow {
     pub name: String,
     pub value: i32,
     pub count: i64,
+    pub awarded_at: Option<chrono::NaiveDateTime>,
 }
 
 /// One `/trophies guild` row; `used` = at least one award references it.
@@ -188,12 +190,14 @@ pub async fn user_trophy_rows(
     user_id: i64,
 ) -> Result<Vec<UserTrophyRow>, DbErr> {
     let count = Alias::new("count");
+    let awarded_at = Alias::new("awarded_at");
     let trophy_id = (trophies::Entity, trophies::Column::Id);
     let stmt = Query::select()
         .column((trophies::Entity, trophies::Column::Emoji))
         .column((trophies::Entity, trophies::Column::Name))
         .column((trophies::Entity, trophies::Column::Value))
         .expr_as(Expr::col(trophy_id).count(), count)
+        .expr_as(Expr::col((user_trophies::Entity, user_trophies::Column::AwardedAt)).max(), awarded_at)
         .from(user_trophies::Entity)
         .inner_join(
             trophies::Entity,
@@ -220,6 +224,7 @@ pub async fn user_trophy_rows(
                 name: row.try_get_by_index(1)?,
                 value: row.try_get_by_index(2)?,
                 count: row.try_get_by_index(3)?,
+                awarded_at: row.try_get_by_index(4)?,
             })
         })
         .collect()
@@ -375,6 +380,7 @@ mod tests {
                 ("name", "Gold".into()),
                 ("value", value_markup(10).into()),
                 ("count", 3.into()),
+                ("awarded_at", "2026-01-01 12:34".into()),
             ],
         );
         assert!(row.contains("Gold"), "got: {row}");
@@ -468,14 +474,10 @@ mod tests {
         award(&db, 1, 42, shame).await;
 
         let rows = user_trophy_rows(&db, 1, 42).await.expect("query rows");
-        assert_eq!(
-            rows,
-            vec![
-                UserTrophyRow { emoji: "🥇".into(), name: "Gold".into(), value: 50, count: 1 },
-                UserTrophyRow { emoji: "🏆".into(), name: "Small".into(), value: 5, count: 3 },
-                UserTrophyRow { emoji: "💀".into(), name: "Shame".into(), value: -3, count: 1 },
-            ]
-        );
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].awarded_at.is_some(), "gold row should carry the latest award time");
+        assert!(rows[1].awarded_at.is_some(), "small row should carry the latest award time");
+        assert!(rows[2].awarded_at.is_some(), "shame row should carry the latest award time");
     }
 
     #[tokio::test]

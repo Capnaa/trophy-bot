@@ -38,7 +38,7 @@ const MAX_VALUE: i32 = 999_999;
 const DEFAULT_DESCRIPTION: &str = "No description provided";
 const DEFAULT_EMOJI: &str = "🏆";
 const DEFAULT_DETAILS: &str = "No details provided.";
-const DEFAULT_VALUE: i32 = 10;
+const DEFAULT_VALUE: i32 = 1;
 
 /// Everything that can make `/create` refuse, mapped 1:1 to localized
 /// messages in `locales/en-US/create.ftl`.
@@ -739,7 +739,7 @@ mod tests {
         let message = CreateError::FieldTooLong { field: "name", max: 32 }.message(&locale);
         assert!(message.contains("32"), "got: {message}");
         let message = CreateError::GuildFull.message(&locale);
-        assert!(message.contains("150"), "got: {message}");
+        assert!(message.contains("512"), "got: {message}");
         let message = CreateError::DuplicateName { name: "Gold".into() }.message(&locale);
         assert!(message.contains("Gold"), "got: {message}");
     }

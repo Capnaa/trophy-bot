@@ -3,7 +3,7 @@
 trophies-user-title = { $name }'s Trophies
 trophies-user-total = Total score: **{ $score }** :medal:
 trophies-user-empty = No trophies yet.
-trophies-user-row = { $emoji } { $name }{ $value } _x{ $count }_
+trophies-user-row = { $emoji } { $name }{ $value } _x{ $count }_ — awarded { $awarded_at }
 trophies-guild-title = Server Trophies
 trophies-guild-total = Total trophies created: **{ $total }**
 trophies-guild-hidden = { $hidden ->
