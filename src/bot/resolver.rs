@@ -62,10 +62,11 @@ pub async fn resolve_trophy_or_reply(
 }
 
 /// Pure choice filter behind [`autocomplete_trophy`]: keeps the trophies whose
-/// normalized name starts with the normalized partial input, preserving the
-/// caller's ordering, capped at [`MAX_CHOICES`]. An empty partial normalizes
-/// to `""` so every trophy matches — the user sees the guild's trophies right
-/// away when the option field is still blank.
+/// normalized name matches the normalized partial input as a prefix, including
+/// multi-word phrases token-by-token, preserving the caller's ordering, capped
+/// at [`MAX_CHOICES`]. An empty partial normalizes to `""` so every trophy
+/// matches — the user sees the guild's trophies right away when the option
+/// field is still blank.
 pub fn prefix_choices(names: &[(String, String)], partial: &str) -> Vec<String> {
     let needle = normalize_name(partial);
     // `normalize_name("")` falls back to the lowercased raw input, so a
@@ -74,10 +75,40 @@ pub fn prefix_choices(names: &[(String, String)], partial: &str) -> Vec<String> 
     let needle = if partial.trim().is_empty() { String::new() } else { needle };
     names
         .iter()
-        .filter(|(_, normalized)| normalized.starts_with(&needle))
+        .filter(|(name, normalized)| matches_partial(name, normalized, &needle, partial))
         .map(|(name, _)| name.clone())
         .take(MAX_CHOICES)
         .collect()
+}
+
+fn matches_partial(name: &str, normalized_name: &str, partial: &str, raw_partial: &str) -> bool {
+    if partial.is_empty() {
+        return true;
+    }
+
+    if normalized_name.starts_with(partial) {
+        return true;
+    }
+
+    let raw_partial_tokens: Vec<String> = raw_partial
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let name_tokens: Vec<String> = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+
+    if raw_partial_tokens.is_empty() || raw_partial_tokens.len() > name_tokens.len() {
+        return false;
+    }
+
+    raw_partial_tokens
+        .iter()
+        .zip(name_tokens.iter())
+        .all(|(partial_token, name_token)| name_token.starts_with(partial_token))
 }
 
 /// Poise autocomplete callback for `trophy` options: prefix match on the
@@ -240,6 +271,12 @@ mod tests {
         let names = pairs(&["Alpha", "Beta", "🏆"]);
         assert_eq!(prefix_choices(&names, ""), vec!["Alpha", "Beta", "🏆"]);
         assert_eq!(prefix_choices(&names, "   "), vec!["Alpha", "Beta", "🏆"]);
+    }
+
+    #[test]
+    fn multi_word_partial_matches_full_phrase_tokens() {
+        let names = pairs(&["Gold Medal", "Mining Medal", "Mining Ace"]);
+        assert_eq!(prefix_choices(&names, "mining medal"), vec!["Mining Medal"]);
     }
 
     #[test]
