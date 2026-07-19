@@ -82,7 +82,7 @@ Discord default permission: Manage Guild (`"32"`, create.js:8). Legacy marker: `
 ### Validation rules & limits
 
 - 150 trophies/guild (`>= 150` check, so 150 is the hard cap).
-- name ≤32, description ≤128, emoji ≤64, dedication ≤32, details ≤300 chars; value in [-999999, 999999].
+- name ≤32, description ≤512, emoji ≤64, dedication ≤32, details ≤300 chars; value in [-999999, 999999].
 - Value is a **Number option: fractional values (e.g. 10.5) are accepted and stored** — legacy data may contain floats.
 - Duplicate trophy names are **not** prevented.
 - Image: extension ∈ {png,jpg,jpeg,gif} (by filename), size ≤ 1,000,000 bytes.

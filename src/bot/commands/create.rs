@@ -29,7 +29,7 @@ pub(crate) const MAX_TROPHIES_PER_GUILD: u64 = 150;
 
 // Legacy field limits (spec §/create "Validation rules & limits").
 const MAX_NAME_CHARS: usize = 32;
-const MAX_DESCRIPTION_CHARS: usize = 128;
+const MAX_DESCRIPTION_CHARS: usize = 512;
 const MAX_EMOJI_CHARS: usize = 64;
 const MAX_DEDICATION_CHARS: usize = 32;
 const MAX_DETAILS_CHARS: usize = 300;
@@ -562,10 +562,10 @@ mod tests {
             validate_fields(&at(33), None, None, 10, None, None),
             Err(CreateError::FieldTooLong { field: "name", max: 32 })
         );
-        assert_eq!(validate_fields("n", Some(&at(128)), None, 10, None, None), Ok(()));
+        assert_eq!(validate_fields("n", Some(&at(512)), None, 10, None, None), Ok(()));
         assert_eq!(
-            validate_fields("n", Some(&at(129)), None, 10, None, None),
-            Err(CreateError::FieldTooLong { field: "description", max: 128 })
+            validate_fields("n", Some(&at(513)), None, 10, None, None),
+            Err(CreateError::FieldTooLong { field: "description", max: 512 })
         );
         assert_eq!(validate_fields("n", None, Some(&at(64)), 10, None, None), Ok(()));
         assert_eq!(
