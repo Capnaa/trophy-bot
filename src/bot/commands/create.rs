@@ -23,9 +23,8 @@ use crate::domain::normalize::normalize_name;
 use crate::entities::{guilds, trophies};
 use crate::i18n::{self, LanguageIdentifier};
 
-/// Per-guild trophy cap. Kept at the legacy 150 for parity at cutover
-/// (rust-parity-plan §4.5) — a config value now, not a technical ceiling.
-pub(crate) const MAX_TROPHIES_PER_GUILD: u64 = 150;
+/// Per-guild trophy cap. Raised to 512 for the new larger trophy text budget.
+pub(crate) const MAX_TROPHIES_PER_GUILD: u64 = 512;
 
 // Legacy field limits (spec §/create "Validation rules & limits").
 const MAX_NAME_CHARS: usize = 32;
