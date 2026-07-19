@@ -140,7 +140,9 @@ pub async fn show(
     trophy: String,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = util::require_guild_id(&ctx)?;
+    // Effective guild (guild_links): a linked guild's /show reads the
+    // SOURCE guild's trophy (and its dedication display setting) it mirrors.
+    let guild_id = util::effective_guild_id(&ctx).await?;
     let db = &ctx.data().db;
 
     let Some(model) = resolver::resolve_trophy_or_reply(

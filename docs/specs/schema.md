@@ -123,7 +123,7 @@ Rendered content: every ACTIVE trophy in the effective guild, one embed field pe
 |---|---|---|---|
 | id | UUID | PK | UUIDv7, app-generated |
 | source_guild_id | i64 | NOT NULL, FK guilds ON DELETE CASCADE | the data owner ("guild A") |
-| linked_guild_id | i64 | NOT NULL, FK guilds ON DELETE CASCADE | the panel host ("guild B") that mirrors `source_guild_id`'s panels |
+| linked_guild_id | i64 | NOT NULL, FK guilds ON DELETE CASCADE | the co-administering guild ("guild B") — once accepted, every trophy-content command run in B (`util::effective_guild_id`) operates on `source_guild_id`'s data instead of its own |
 | requested_by | i64 | NOT NULL | user who ran `/link request` |
 | accepted_by | i64 | NULL | user who ran `/link accept`; NULL while pending |
 | accepted_at | timestamp | NULL | **NULL = pending, set = accepted** — doubles as the status flag, no separate enum column |

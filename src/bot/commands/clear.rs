@@ -48,7 +48,9 @@ pub async fn clear(
     #[description = "User to clear all trophies from"] user: serenity::User,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = util::require_guild_id(&ctx)?;
+    // Effective guild (guild_links): a linked guild's /clear resets the
+    // member's trophies and score in the SOURCE guild it mirrors.
+    let guild_id = util::effective_guild_id(&ctx).await?;
     let db = &ctx.data().db;
 
     let cleared = clear_awards(db, guild_id.get() as i64, user.id.get() as i64).await?;

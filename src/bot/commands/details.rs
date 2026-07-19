@@ -31,7 +31,9 @@ pub async fn details(
     trophy: String,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = util::require_guild_id(&ctx)?;
+    // Effective guild (guild_links): a linked guild's /details reads the
+    // SOURCE guild's trophy it mirrors.
+    let guild_id = util::effective_guild_id(&ctx).await?;
 
     let Some(model) = resolver::resolve_trophy_or_reply(
         ctx,

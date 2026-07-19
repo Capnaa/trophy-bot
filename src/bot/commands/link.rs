@@ -1,14 +1,14 @@
-//! `/link` — cross-guild panel mirroring (schema.md `guild_links`).
+//! `/link` — full cross-guild co-administration (schema.md `guild_links`).
 //!
-//! Read-only, mutual-consent link between two guilds: the LINKED guild ("B",
-//! the one that runs `/link request`) gets its `/panel` and `/panel medals`
-//! panels backed by the SOURCE guild's ("A") data instead of its own, once A
-//! explicitly accepts. Nothing else changes — every trophy-mutating command
-//! stays scoped to `ctx.guild_id()` exactly as before; only the two panel
-//! types (`src/bot/panel_updater.rs`, `src/bot/medals_panel.rs`) consult the
-//! link, and they re-validate it on every refresh rather than trusting a
-//! cached column, so a revoked link stops showing data on the very next
-//! refresh even if the cleanup here somehow misses a row.
+//! Mutual-consent link between two guilds: once the SOURCE guild ("A")
+//! accepts a request from the LINKED guild ("B"), B becomes a full second
+//! control room for A. Every trophy-content command run in B
+//! (`/create`, `/edit`, `/delete`, `/award`, `/revoke`, `/clear`, `/details`,
+//! `/show`, `/trophies`, `/leaderboard`, plus both panel types) transparently
+//! reads and writes A's data instead of B's own — see
+//! `util::effective_guild_id`, the single primitive every one of those
+//! commands routes through. `MANAGE_GUILD` in B is still what gates who may
+//! run them; A is trusting B's admins with the same reach as its own.
 //!
 //! Business logic (parsing, the actual reads/writes) lives in
 //! `crate::domain::guild_links`; this file is the thin poise layer plus the

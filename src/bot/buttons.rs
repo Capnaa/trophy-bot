@@ -332,7 +332,7 @@ async fn handle_show_holders(
     invoker_id: u64,
 ) -> anyhow::Result<()> {
     let locale = i18n::resolve(Some(&component.locale));
-    let Some(guild_id) = component.guild_id else {
+    let Some(interaction_guild_id) = component.guild_id else {
         return Ok(());
     };
 
@@ -348,6 +348,15 @@ async fn handle_show_holders(
         component.create_followup(&ctx.http, reply).await?;
         return Ok(());
     }
+
+    // Effective guild (guild_links): a linked guild's /show holders button
+    // targets the SOURCE guild's trophy it mirrors, same as /show itself.
+    let guild_id = {
+        let effective =
+            crate::domain::guild_links::effective_guild(&data.db, interaction_guild_id.get() as i64)
+                .await?;
+        serenity::GuildId::new(effective as u64)
+    };
 
     let trophy = trophies::Entity::find_by_id(trophy_id)
         .filter(trophies::Column::GuildId.eq(guild_id.get() as i64))
@@ -464,7 +473,7 @@ async fn handle_trophy_delete(
     trophy_id: Uuid,
 ) -> anyhow::Result<()> {
     let locale = i18n::resolve(Some(&component.locale));
-    let Some(guild_id) = component.guild_id else {
+    let Some(interaction_guild_id) = component.guild_id else {
         return Ok(()); // guild message components can't fire outside a guild
     };
 
@@ -475,6 +484,16 @@ async fn handle_trophy_delete(
     component
         .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
         .await?;
+
+    // Effective guild (guild_links): a linked guild's confirmation button
+    // targets the SOURCE guild's trophy it mirrors, same as the /delete
+    // command that issued it.
+    let guild_id = {
+        let effective =
+            crate::domain::guild_links::effective_guild(&data.db, interaction_guild_id.get() as i64)
+                .await?;
+        serenity::GuildId::new(effective as u64)
+    };
 
     let outcome = delete_press_outcome(
         button,

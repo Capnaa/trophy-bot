@@ -30,6 +30,21 @@ pub fn require_guild_id(ctx: &Context<'_>) -> Result<serenity::GuildId, Error> {
         .ok_or_else(|| anyhow::anyhow!("guild_only command invoked outside a guild"))
 }
 
+/// The guild a trophy-content command should actually read/write: this
+/// guild's own id, unless it's linked (accepted, `guild_links`) to a source
+/// guild — in which case every trophy command
+/// (create/edit/delete/award/revoke/clear/details/show/trophies/leaderboard)
+/// transparently operates on the SOURCE guild's data instead, making the
+/// linked guild a full second control room for it. Discord's own
+/// `MANAGE_GUILD` check still gates who may run these, scoped to the guild
+/// the command was actually invoked in (unaffected by this redirect).
+pub async fn effective_guild_id(ctx: &Context<'_>) -> Result<serenity::GuildId, Error> {
+    let own = require_guild_id(ctx)?;
+    let effective =
+        crate::domain::guild_links::effective_guild(&ctx.data().db, own.get() as i64).await?;
+    Ok(serenity::GuildId::new(effective as u64))
+}
+
 /// Legacy `getPage` semantics (shared by every paginated list):
 /// `last = ceil(len / per_page)` floored at 1, `page` clamped to `[1, last]`;
 /// returns the slice, the clamped page and `last`. An empty list yields
@@ -161,6 +176,39 @@ mod tests {
                     && !source.contains("invoked without a guild"),
                 "{} re-implements the guild-id boilerplate; use util::require_guild_id",
                 path.display()
+            );
+        }
+    }
+
+    /// Every trophy-content command must resolve its guild through
+    /// [`effective_guild_id`], not the bare [`require_guild_id`] — otherwise
+    /// a linked guild's command would silently keep operating on its own
+    /// (possibly empty) data instead of the source guild it mirrors. Guards
+    /// against a future edit or new command accidentally regressing this.
+    #[test]
+    fn trophy_content_commands_use_the_effective_guild_not_the_raw_one() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/bot/commands");
+        for name in [
+            "create.rs",
+            "edit.rs",
+            "delete.rs",
+            "award.rs",
+            "revoke.rs",
+            "clear.rs",
+            "details.rs",
+            "show.rs",
+            "trophies.rs",
+            "leaderboard.rs",
+        ] {
+            let source = std::fs::read_to_string(format!("{dir}/{name}"))
+                .unwrap_or_else(|err| panic!("read {name}: {err}"));
+            assert!(
+                source.contains("effective_guild_id"),
+                "{name} must resolve its guild via util::effective_guild_id (guild_links redirect)"
+            );
+            assert!(
+                !source.contains("util::require_guild_id"),
+                "{name} calls util::require_guild_id directly, bypassing the guild_links redirect"
             );
         }
     }

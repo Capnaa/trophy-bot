@@ -1,7 +1,11 @@
-//! Cross-guild panel-link consent (schema.md `guild_links`): a linked guild
-//! ("B") can mirror at most one source guild's ("A") panels at a time, and
-//! only after A explicitly accepts B's request. `accepted_at` doubles as
-//! the status flag (NULL = pending, set = accepted).
+//! Cross-guild link consent (schema.md `guild_links`): a linked guild ("B")
+//! can mirror at most one source guild's ("A") data at a time, and only
+//! after A explicitly accepts B's request. Once accepted, B becomes a full
+//! second control room for A — every trophy-content command run in B
+//! ([`effective_guild`], via `util::effective_guild_id`) reads and writes
+//! A's trophies directly (create/edit/delete/award/revoke/clear/details/
+//! show/trophies/leaderboard), not just its panels. `accepted_at` doubles
+//! as the status flag (NULL = pending, set = accepted).
 
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
@@ -28,6 +32,19 @@ pub async fn accepted_source_for(
         .one(db)
         .await?;
     Ok(row.map(|r| r.source_guild_id))
+}
+
+/// The guild a command run in `own_guild_id` should actually operate
+/// on: the linked source if one is accepted, else `own_guild_id` itself.
+/// The single primitive every trophy-content command routes through
+/// (`util::effective_guild_id`) — unlinked guilds get back exactly what
+/// they passed in, so this is a no-op for the overwhelming majority of
+/// guilds that never link.
+pub async fn effective_guild(
+    db: &impl ConnectionTrait,
+    own_guild_id: i64,
+) -> Result<i64, sea_orm::DbErr> {
+    Ok(accepted_source_for(db, own_guild_id).await?.unwrap_or(own_guild_id))
 }
 
 /// Re-validation used at every panel render: true only for an exact,
@@ -236,6 +253,23 @@ mod tests {
         let guild1 = guilds::Entity::find_by_id(1).one(&db).await.unwrap();
         let guild2 = guilds::Entity::find_by_id(2).one(&db).await.unwrap();
         assert!(guild1.is_some() && guild2.is_some(), "both guild rows auto-registered");
+    }
+
+    // --- effective_guild ---
+
+    #[tokio::test]
+    async fn effective_guild_is_the_source_only_when_accepted() {
+        let db = fresh_db().await;
+        assert_eq!(effective_guild(&db, 2).await.unwrap(), 2, "unlinked guild is its own effective guild");
+
+        request_link(&db, 1, 2, 42).await.unwrap().unwrap();
+        assert_eq!(effective_guild(&db, 2).await.unwrap(), 2, "still pending: no redirect yet");
+
+        accept_link(&db, 1, 2, 99).await.unwrap().unwrap();
+        assert_eq!(effective_guild(&db, 2).await.unwrap(), 1, "accepted: redirects to the source");
+
+        revoke_link(&db, 1, 2).await.unwrap();
+        assert_eq!(effective_guild(&db, 2).await.unwrap(), 2, "revoked: back to its own guild");
     }
 
     #[tokio::test]

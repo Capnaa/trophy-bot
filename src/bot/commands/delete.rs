@@ -90,7 +90,9 @@ pub async fn delete(
     trophy: String,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = util::require_guild_id(&ctx)?;
+    // Effective guild (guild_links): a linked guild's /delete targets the
+    // SOURCE guild's trophy it mirrors, same as /create and /edit.
+    let guild_id = util::effective_guild_id(&ctx).await?;
     let db = &ctx.data().db;
 
     let Some(model) = resolver::resolve_trophy_or_reply(

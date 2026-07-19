@@ -116,15 +116,17 @@ Source of truth: `commands/manage/export.js`, `panel.js`, `perms.js`, `rewards.j
 
 ## /link — new capability, no legacy equivalent
 
-**Purpose:** Read-only, mutual-consent link between two guilds so one guild's `/panel` and `/panel medals` panels can mirror another's data instead of duplicating trophies across servers.
+**Purpose:** Mutual-consent, full cross-guild co-administration — the LINKED guild ("B") becomes a second control room for the SOURCE guild's ("A") medals: every trophy-content command run in B transparently operates on A's data instead of B's own.
 
 **Definition:**
 - Subcommands: `request <guild_id>`, `accept <guild_id>`, `revoke [guild_id]`, `status` — `guild_id` is a typed Discord snowflake (no native "other guild" picker exists in Discord's slash command API); `accept`/`revoke`'s `guild_id` autocompletes against this guild's own pending/linked rows only (never a global guild listing — a server's use of the bot is never exposed to another).
 - Discord default permission: Manage Guild.
 
-**Roles:** the LINKED guild ("B") runs `request <A>`; an admin in the SOURCE guild ("A") runs `accept <B>`. Once accepted, B's panel commands automatically render A's data — no parameter needed on `/panel create`/`/panel medals create`, since `guild_links.UNIQUE(linked_guild_id)` means B can only ever mirror one source at a time. A can be the source for many guilds (one-to-many). Every mutating trophy command (`/create`, `/edit`, `/delete`, `/award`, `/revoke`, `/clear`) stays scoped to `ctx.guild_id()` exactly as before — this feature is panels-only, never write access.
+**Roles:** the LINKED guild ("B") runs `request <A>`; an admin in the SOURCE guild ("A") runs `accept <B>`. `guild_links.UNIQUE(linked_guild_id)` means B can only ever mirror one source at a time; A can be the source for many guilds (one-to-many).
 
-**Safety:** `revoke` (either side, unilateral) deletes the `guild_links` row and immediately tears down every panel B had pointed at A (message + record, both panel types). Independently, both panel updaters (`panel_updater.rs`, `medals_panel.rs`) re-validate the link against `guild_links` on **every** refresh before rendering cross-guild data — not just trusting a cached column — so a revoked link stops leaking data on the very next refresh even if the revoke-time cleanup ever missed a row (same "sweep is the safety net" philosophy as the existing F32 dead-panel cleanup).
+**Scope — every trophy-content command redirects, nothing else does:** once accepted, `/create`, `/edit`, `/delete`, `/award`, `/revoke`, `/clear`, `/details`, `/show`, `/trophies`, `/leaderboard`, and both panel types (`/panel`, `/panel medals`, `/panel overview`) all resolve the EFFECTIVE guild via `util::effective_guild_id` (`src/bot/util.rs`) — B's own id unless linked, in which case A's — and act on it directly: awarding, editing, and deleting A's trophies from B works exactly as if run in A. `MANAGE_GUILD` in B is still what gates who may invoke these; granting a link means trusting B's admins with A's full trophy-management reach. Guild-identity commands (`/settings`, `/rewards`, `/export`, `/link` itself) are **not** redirected — they always operate on the guild they're actually run in.
+
+**Safety:** `revoke` (either side, unilateral) deletes the `guild_links` row and immediately tears down every panel B had pointed at A (message + record, both panel types); B's trophy commands stop reaching A's data on the very next invocation, since `effective_guild_id` re-checks `guild_links` every time rather than caching the redirect. Independently, both panel updaters (`panel_updater.rs`, `medals_panel.rs`) re-validate the link against `guild_links` on **every** refresh before rendering cross-guild data — not just trusting a cached column — so a revoked link stops leaking data on the very next refresh even if the revoke-time cleanup ever missed a row (same "sweep is the safety net" philosophy as the existing F32 dead-panel cleanup).
 
 ---
 

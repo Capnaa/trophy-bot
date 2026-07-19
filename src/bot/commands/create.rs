@@ -371,7 +371,6 @@ pub async fn create(
     active: Option<bool>,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = util::require_guild_id(&ctx)?.get() as i64;
     let value = value.unwrap_or(DEFAULT_VALUE);
     let category = normalize_category(category);
 
@@ -418,6 +417,11 @@ pub async fn create(
     // `reply_error_ephemeral` (§2: all error replies are ephemeral).
     ctx.defer().await?;
 
+    // Effective guild (guild_links): resolved after the defer since it's a
+    // DB round trip like everything else past this point — see the module
+    // doc on `util::effective_guild_id`. A linked guild's /create adds the
+    // trophy directly to the SOURCE guild it mirrors.
+    let guild_id = util::effective_guild_id(&ctx).await?.get() as i64;
     let db = &ctx.data().db;
     if let Some(err) = precheck(db, guild_id, &name).await? {
         return util::reply_error_ephemeral(ctx, err.message(&locale)).await;

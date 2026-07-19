@@ -372,7 +372,9 @@ pub async fn edit(
     #[description = "Whether this medal can currently be awarded"] active: Option<bool>,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = util::require_guild_id(&ctx)?.get() as i64;
+    // Effective guild (guild_links): a linked guild's /edit operates on the
+    // SOURCE guild's trophy it mirrors, same as /create.
+    let guild_id = util::effective_guild_id(&ctx).await?.get() as i64;
     let db = &ctx.data().db;
 
     let Some(current) =

@@ -43,7 +43,7 @@ async fn user(
     #[description = "User to check trophies"] user: Option<serenity::User>,
     #[description = "Page to look at"] page: Option<i64>,
 ) -> Result<(), Error> {
-    let guild_id = require_guild_id(&ctx)?;
+    let guild_id = effective_guild_id(&ctx).await?;
     let target = user.as_ref().unwrap_or_else(|| ctx.author());
     let target_id = i64::try_from(target.id.get())?;
     let db = &ctx.data().db;
@@ -97,7 +97,7 @@ async fn guild(
     ctx: Context<'_>,
     #[description = "Page to look at"] page: Option<i64>,
 ) -> Result<(), Error> {
-    let guild_id = require_guild_id(&ctx)?;
+    let guild_id = effective_guild_id(&ctx).await?;
     let db = &ctx.data().db;
     let locale = util::locale(&ctx);
 
@@ -302,8 +302,10 @@ fn page_footer(locale: &i18n::LanguageIdentifier, page: usize, last: usize) -> S
     )
 }
 
-fn require_guild_id(ctx: &Context<'_>) -> Result<i64, Error> {
-    Ok(util::require_guild_id(ctx)?.get() as i64)
+/// Effective guild (guild_links): a linked guild's /trophies lists the
+/// SOURCE guild's trophies/holders it mirrors.
+async fn effective_guild_id(ctx: &Context<'_>) -> Result<i64, Error> {
+    Ok(util::effective_guild_id(ctx).await?.get() as i64)
 }
 
 #[cfg(test)]

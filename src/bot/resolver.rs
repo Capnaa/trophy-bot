@@ -120,22 +120,26 @@ pub async fn autocomplete_trophy(ctx: Context<'_>, partial: &str) -> Vec<String>
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
+    let db = &ctx.data().db;
+    // Cross-guild link: a linked guild has no trophies of its own — suggest
+    // the source guild's instead, matching what the command will actually
+    // resolve against.
+    let effective = crate::domain::guild_links::effective_guild(db, guild_id.get() as i64)
+        .await
+        .unwrap_or(guild_id.get() as i64);
     let names: Result<Vec<(String, String)>, DbErr> = trophies::Entity::find()
-        .filter(trophies::Column::GuildId.eq(guild_id.get() as i64))
+        .filter(trophies::Column::GuildId.eq(effective))
         .select_only()
         .column(trophies::Column::Name)
         .column(trophies::Column::NormalizedName)
         .order_by_asc(trophies::Column::Name)
         .into_tuple()
-        .all(&ctx.data().db)
+        .all(db)
         .await;
     match names {
         Ok(names) => prefix_choices(&names, partial),
         Err(err) => {
-            log::warn!(
-                "trophy autocomplete query failed (guild={}): {err}",
-                guild_id.get()
-            );
+            log::warn!("trophy autocomplete query failed (guild={effective}): {err}");
             Vec::new()
         }
     }
@@ -149,23 +153,24 @@ pub async fn autocomplete_active_trophy(ctx: Context<'_>, partial: &str) -> Vec<
     let Some(guild_id) = ctx.guild_id() else {
         return Vec::new();
     };
+    let db = &ctx.data().db;
+    let effective = crate::domain::guild_links::effective_guild(db, guild_id.get() as i64)
+        .await
+        .unwrap_or(guild_id.get() as i64);
     let names: Result<Vec<(String, String)>, DbErr> = trophies::Entity::find()
-        .filter(trophies::Column::GuildId.eq(guild_id.get() as i64))
+        .filter(trophies::Column::GuildId.eq(effective))
         .filter(trophies::Column::Active.eq(true))
         .select_only()
         .column(trophies::Column::Name)
         .column(trophies::Column::NormalizedName)
         .order_by_asc(trophies::Column::Name)
         .into_tuple()
-        .all(&ctx.data().db)
+        .all(db)
         .await;
     match names {
         Ok(names) => prefix_choices(&names, partial),
         Err(err) => {
-            log::warn!(
-                "active trophy autocomplete query failed (guild={}): {err}",
-                guild_id.get()
-            );
+            log::warn!("active trophy autocomplete query failed (guild={effective}): {err}");
             Vec::new()
         }
     }

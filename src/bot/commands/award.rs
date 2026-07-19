@@ -80,7 +80,9 @@ pub async fn award(
     count: Option<i64>,
 ) -> Result<(), Error> {
     let locale = util::locale(&ctx);
-    let guild_id = util::require_guild_id(&ctx)?;
+    // Effective guild (guild_links): a linked guild's /award targets the
+    // SOURCE guild's trophy and score it mirrors.
+    let guild_id = util::effective_guild_id(&ctx).await?;
     let db = &ctx.data().db;
 
     // F8: reject out-of-range counts server-side too (the Discord client
