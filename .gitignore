@@ -131,6 +131,7 @@ dist
 
 json.sqlite
 *_db.json
+trophy_bot.db
 
 images/
 
