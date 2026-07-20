@@ -10,3 +10,8 @@ medals-overview-empty = No active medals yet.
 medals-overview-uncategorized = Uncategorized
 medals-overview-truncated = …(list truncated)
 medals-overview-more-categories = Some categories aren't shown — this server has more than Discord allows in one panel.
+
+# All-categories retired-medals overview panel content (`/panel retired create|delete`).
+# Reuses medals-overview-uncategorized/truncated/more-categories above.
+medals-retired-title = 🎖️ Retired Medals
+medals-retired-empty = No retired medals yet.

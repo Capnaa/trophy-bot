@@ -7,6 +7,7 @@ mod m20260708_000001_initial_schema;
 mod m20260719_000002_medal_categories;
 mod m20260719_000003_guild_links;
 mod m20260719_000004_medals_overview_panels;
+mod m20260720_000005_retired_medals_overview_panels;
 
 
 pub struct Migrator;
@@ -18,7 +19,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260708_000001_initial_schema::Migration),
             Box::new(m20260719_000002_medal_categories::Migration),
             Box::new(m20260719_000003_guild_links::Migration),
-            Box::new(m20260719_000004_medals_overview_panels::Migration)
+            Box::new(m20260719_000004_medals_overview_panels::Migration),
+            Box::new(m20260720_000005_retired_medals_overview_panels::Migration)
         ]
     }
 }
@@ -843,6 +845,6 @@ mod tests {
         let applied = Migrator::get_applied_migrations(&db)
             .await
             .expect("read applied migrations");
-        assert_eq!(applied.len(), 4);
+        assert_eq!(applied.len(), 5);
     }
 }

@@ -117,6 +117,18 @@ Indexes: `UNIQUE(guild_id, category)` — one panel per category per guild (the 
 
 Rendered content: every ACTIVE trophy in the effective guild, one embed field per category (alphabetical, capped at Discord's 25-field limit) plus a trailing "Uncategorized" field for active trophies with no category — each field lists its medals the same way `active_medals_panels` does. Refreshed by the exact same trigger as `active_medals_panels` (any category/active/name/emoji/description change) and swept the same way (F32-style) — piggybacks on `medals_panel.rs`'s existing debounce/sweep rather than a separate signal channel.
 
+## retired_medals_overview_panels
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| guild_id | i64 | PK, FK guilds ON DELETE CASCADE | one retired-overview panel per guild, enforced by PK (same convention as `leaderboard_panels`) |
+| channel_id | i64 | NOT NULL | |
+| message_id | i64 | NOT NULL | |
+| source_guild_id | i64 | NULL | cross-guild link (guild_links): NULL = render `guild_id`'s own catalog (default); set = render this OTHER guild's instead |
+| created_at / updated_at | timestamp | NOT NULL | updated_at doubles as "last successful render" |
+
+The inactive counterpart of `medals_overview_panels`: same shape, same table-per-guild convention, separate table rather than a boolean discriminator on the same row (a guild can run one active overview panel and one retired overview panel simultaneously, in different channels). Rendered content: every INACTIVE trophy in the effective guild, grouped and capped identically to `medals_overview_panels`. Refreshed by the exact same per-category signal as `active_medals_panels`/`medals_overview_panels` and swept the same way (F32-style).
+
 ## guild_links
 
 | Column | Type | Constraints | Notes |

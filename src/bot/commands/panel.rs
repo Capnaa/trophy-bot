@@ -38,7 +38,7 @@ use crate::i18n;
     guild_only,
     default_member_permissions = "MANAGE_GUILD",
     required_permissions = "MANAGE_GUILD",
-    subcommands("create", "delete", "medals", "overview"),
+    subcommands("create", "delete", "medals", "overview", "retired"),
     subcommand_required
 )]
 pub async fn panel(_ctx: Context<'_>) -> Result<(), Error> {
@@ -68,6 +68,19 @@ async fn medals(_ctx: Context<'_>) -> Result<(), Error> {
     rename = "overview"
 )]
 async fn overview(_ctx: Context<'_>) -> Result<(), Error> {
+    // Never reached: subcommand_required.
+    Ok(())
+}
+
+/// Manage the all-categories retired (inactive) medals overview panel.
+#[poise::command(
+    slash_command,
+    guild_only,
+    subcommands("retired_create", "retired_delete"),
+    subcommand_required,
+    rename = "retired"
+)]
+async fn retired(_ctx: Context<'_>) -> Result<(), Error> {
     // Never reached: subcommand_required.
     Ok(())
 }
@@ -366,6 +379,98 @@ async fn overview_delete(ctx: Context<'_>) -> Result<(), Error> {
     util::reply_embed(ctx, embed, true).await
 }
 
+/// Create a catalog panel of every retired (inactive) medal, sectioned by category.
+#[poise::command(
+    slash_command,
+    guild_only,
+    default_member_permissions = "MANAGE_GUILD",
+    required_permissions = "MANAGE_GUILD",
+    rename = "create"
+)]
+async fn retired_create(ctx: Context<'_>) -> Result<(), Error> {
+    let locale = util::locale(&ctx);
+    let guild_id = util::require_guild_id(&ctx)?;
+    let db = &ctx.data().db;
+
+    // The first render queries the DB and can exceed the 3s window on a
+    // large catalog — acknowledge early; the confirmation stays ephemeral.
+    ctx.defer_ephemeral().await?;
+
+    // Cross-guild link: if this guild mirrors another one, the panel
+    // renders (and later refreshes) THAT guild's full catalog.
+    let source = guild_links::accepted_source_for(db, guild_id.get() as i64).await?;
+    let data_guild_id = source.unwrap_or(guild_id.get() as i64);
+
+    let panel_locale = i18n::resolve(None);
+    let embed = medals_panel::render_retired_overview_embed(db, data_guild_id, &panel_locale).await?;
+
+    // F31-style: send first; the record exists only for a message that exists.
+    let message = match ctx
+        .channel_id()
+        .send_message(ctx.serenity_context(), serenity::CreateMessage::new().embed(embed))
+        .await
+    {
+        Ok(message) => message,
+        Err(error) => {
+            log::warn!(
+                "/panel retired create could not send the panel message (guild={}, channel={}): {error}",
+                guild_id.get(),
+                ctx.channel_id().get()
+            );
+            return util::reply_error(ctx, i18n::t(&locale, "panel-retired-create-failed"), true)
+                .await;
+        }
+    };
+
+    // F30-style replace semantics: drop the previous retired overview panel
+    // (best effort, logged inside), only after the replacement exists.
+    if let Some(old) = medals_panel::get_retired_overview_panel(db, guild_id.get() as i64).await? {
+        medals_panel::delete_retired_overview_panel_message(ctx.serenity_context(), &old).await;
+    }
+
+    medals_panel::save_retired_overview_panel(
+        db,
+        guild_id.get() as i64,
+        ctx.channel_id().get() as i64,
+        message.id.get() as i64,
+        source,
+    )
+    .await?;
+
+    let embed = serenity::CreateEmbed::new()
+        .colour(util::COLOR_SUCCESS)
+        .description(i18n::t(&locale, "panel-retired-created"));
+    util::reply_embed(ctx, embed, true).await
+}
+
+/// Delete the all-categories retired medals overview panel.
+#[poise::command(
+    slash_command,
+    guild_only,
+    default_member_permissions = "MANAGE_GUILD",
+    required_permissions = "MANAGE_GUILD",
+    rename = "delete"
+)]
+async fn retired_delete(ctx: Context<'_>) -> Result<(), Error> {
+    let locale = util::locale(&ctx);
+    let guild_id = util::require_guild_id(&ctx)?;
+    let db = &ctx.data().db;
+
+    let Some(panel) =
+        medals_panel::get_retired_overview_panel(db, guild_id.get() as i64).await?
+    else {
+        return util::reply_error(ctx, i18n::t(&locale, "panel-retired-delete-none"), true).await;
+    };
+
+    medals_panel::delete_retired_overview_panel_message(ctx.serenity_context(), &panel).await;
+    medals_panel::remove_retired_overview_panel(db, guild_id.get() as i64).await?;
+
+    let embed = serenity::CreateEmbed::new()
+        .colour(util::COLOR_SUCCESS)
+        .description(i18n::t(&locale, "panel-retired-deleted"));
+    util::reply_embed(ctx, embed, true).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,13 +480,13 @@ mod tests {
         let command = panel();
         assert_eq!(command.name, "panel");
         assert!(command.subcommand_required);
-        for name in ["create", "delete", "medals", "overview"] {
+        for name in ["create", "delete", "medals", "overview", "retired"] {
             assert!(
                 command.subcommands.iter().any(|sub| sub.name == name),
                 "missing subcommand {name}"
             );
         }
-        assert_eq!(command.subcommands.len(), 4);
+        assert_eq!(command.subcommands.len(), 5);
     }
 
     #[test]
@@ -418,6 +523,24 @@ mod tests {
             );
         }
         assert_eq!(overview.subcommands.len(), 2);
+    }
+
+    #[test]
+    fn retired_group_registers_create_and_delete_and_requires_one() {
+        let command = panel();
+        let retired = command
+            .subcommands
+            .iter()
+            .find(|sub| sub.name == "retired")
+            .expect("retired subcommand group registered");
+        assert!(retired.subcommand_required);
+        for name in ["create", "delete"] {
+            assert!(
+                retired.subcommands.iter().any(|sub| sub.name == name),
+                "missing /panel retired {name}"
+            );
+        }
+        assert_eq!(retired.subcommands.len(), 2);
     }
 
     #[test]
@@ -472,6 +595,19 @@ mod tests {
             "panel-overview-create-failed",
             "panel-overview-deleted",
             "panel-overview-delete-none",
+        ] {
+            assert_ne!(i18n::t(&locale, key), key, "missing catalog key {key}");
+        }
+    }
+
+    #[test]
+    fn retired_catalog_keys_exist() {
+        let locale = i18n::resolve(None);
+        for key in [
+            "panel-retired-created",
+            "panel-retired-create-failed",
+            "panel-retired-deleted",
+            "panel-retired-delete-none",
         ] {
             assert_ne!(i18n::t(&locale, key), key, "missing catalog key {key}");
         }

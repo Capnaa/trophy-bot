@@ -53,6 +53,7 @@ mod tests {
             "/panel",
             "/panel medals",
             "/panel overview",
+            "/panel retired",
             "/link",
             "/export",
         ] {

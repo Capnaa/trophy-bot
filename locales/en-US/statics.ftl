@@ -27,6 +27,7 @@ help-description =
     • `/panel` — auto-updating leaderboard panel
     • `/panel medals` — auto-updating catalog panel for one category of active trophies
     • `/panel overview` — auto-updating catalog panel for every category at once
+    • `/panel retired` — auto-updating catalog panel for every retired (inactive) medal
     • `/link` — mirror another server's panels here, or let another server mirror yours
     • `/export` — export your server's data
 

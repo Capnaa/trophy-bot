@@ -112,6 +112,16 @@ Source of truth: `commands/manage/export.js`, `panel.js`, `perms.js`, `rewards.j
 
 **Behavior:** backed by its own `medals_overview_panels` table, one row per guild (PK on `guild_id`, same shape as `leaderboard_panels`) — deliberately NOT a special-cased row in `active_medals_panels`, since "all categories" doesn't fit that table's per-category unique key cleanly. Content: one embed field per category (alphabetical, name + `**{emoji} {name}** — {description}` lines exactly like the single-category panel), plus a trailing "Uncategorized" field for active trophies with no category — unlike the single-category `/panel medals` panel, which never shows uncategorized trophies at all. Capped at Discord's 25-field limit with a footer note if a guild has more categories than that (the Uncategorized bucket, sorted last, is what gets dropped first). Refresh is NOT a separate signal/debounce — it piggybacks on the exact same per-category signal `active_medals_panels` already reacts to (any category/active/name/emoji/description change fires both), and the same reconciliation sweep walks both tables. Cross-guild linked (`guild_links`) the same way as the other two panel types.
 
+### /panel retired create|delete — new capability, no legacy equivalent
+
+**Purpose:** The inverse of `/panel overview` — one auto-updating panel showing every RETIRED (inactive) trophy across the whole guild, sectioned by category, so a server can keep a visible archive of medals it no longer awards without those medals cluttering the active roster.
+
+**Definition:**
+- Subcommands: `retired create`, `retired delete` (no options — one retired-overview panel per guild).
+- Discord default permission: Manage Guild.
+
+**Behavior:** backed by its own `retired_medals_overview_panels` table, one row per guild (PK on `guild_id`) — same shape as `medals_overview_panels`, kept as a separate table rather than a flag on it so a guild can run an active overview panel and a retired overview panel side by side (e.g. in different channels). Content: identical structure to `/panel overview` (one embed field per category, alphabetical, trailing "Uncategorized" bucket, 25-field cap with a truncation footer) but filtered to `active = false` instead of `active = true`. Refresh piggybacks on the same per-category signal as `active_medals_panels`/`medals_overview_panels` (any category/active/name/emoji/description change refreshes all three panel types for that category at once) and is swept by the same reconciliation pass (F32-style). Cross-guild linked (`guild_links`) the same way as the other panel types.
+
 ---
 
 ## /link — new capability, no legacy equivalent

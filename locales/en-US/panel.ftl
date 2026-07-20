@@ -20,3 +20,10 @@ panel-overview-created = ✅ Panel created in this channel. It refreshes automat
 panel-overview-create-failed = I couldn't send the panel message in this channel. Make sure I can send messages and embeds here, then try again.
 panel-overview-deleted = ✅ Successfully **deleted** the overview panel.
 panel-overview-delete-none = There is no overview panel in this server.
+
+# /panel retired create|delete — retired-overview CONTENT reuses the shared
+# medals-retired-* keys (locales/en-US/medals_panel.ftl).
+panel-retired-created = ✅ Panel created in this channel. It refreshes automatically when any category's medals change.
+panel-retired-create-failed = I couldn't send the panel message in this channel. Make sure I can send messages and embeds here, then try again.
+panel-retired-deleted = ✅ Successfully **deleted** the retired medals panel.
+panel-retired-delete-none = There is no retired medals panel in this server.
